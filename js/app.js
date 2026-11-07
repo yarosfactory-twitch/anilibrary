@@ -250,14 +250,19 @@ function pendingExtras(a) {
 
 // фоново підтягуємо франшизи для списку (по одній, щоб не впертися в ліміт AniList)
 let frRunning = false;
-async function ensureFranchises() {
-  if (frRunning) return;
+// all: усі тайтли з AniList (потрібно порадам, щоб відкидати франшизи зі списку), інакше лише активні
+let frAgainAll = false;
+async function ensureFranchises(all = false) {
+  if (frRunning) { frAgainAll ||= all; return; } // повний прохід запустимо після поточного
   frRunning = true;
-  const list = items().filter((a) => a.anilistId && !isMovie(a) && ['watching', 'waiting', 'completed'].includes(a.status));
+  const list = items().filter((a) => a.anilistId
+    && (all || (!isMovie(a) && ['watching', 'waiting', 'completed'].includes(a.status))));
   for (const a of list) {
+    if (state.fr.has(a.anilistId) && all) continue; // франшиза вже відома (інший тайтл з неї)
     try { setFranchise(await getFranchise(a.anilistId)); } catch (e) { console.warn('franchise:', e); break; }
   }
   frRunning = false;
+  if (frAgainAll) { frAgainAll = false; return ensureFranchises(true); }
   view?.update?.();
 }
 const isOut = (seq) => seq && (seq.status === 'RELEASING' || seq.status === 'FINISHED');
@@ -954,13 +959,38 @@ function recsView() {
     else render();
   }
 
+  // «NARUTO -ナルト- 疾風伝» → «naruto ナルト 疾風伝»: без регістру, розділових знаків і широких символів
+  const normName = (s) => (s || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  // однакові назви або одна продовжує іншу («naruto» → «naruto shippuden»)
+  const relatedName = (x, y) => x === y || (x.length >= 4 && y.length >= 4 && (x.startsWith(`${y} `) || y.startsWith(`${x} `)));
+  const recNames = (r) => [r.title, r.romaji, r.native].map(normName).filter(Boolean);
+
+  // що вже є у списку: записи AniList разом з усією їхньою франшизою, і назви
+  function ownSets() {
+    const ids = new Set();
+    const names = new Set();
+    for (const a of items()) {
+      [a.title, a.originalTitle].forEach((n) => names.add(normName(n)));
+      if (!a.anilistId) continue;
+      ids.add(a.anilistId);
+      const al = alFor(a.anilistId);
+      if (al) [al.title, al.romaji].forEach((n) => names.add(normName(n)));
+      for (const n of cached(state.fr, a.anilistId, peekFranchise) || []) {
+        ids.add(n.id);
+        names.add(normName(n.title));
+      }
+    }
+    names.delete('');
+    return { ids, names: [...names] };
+  }
+
   function compute() {
-    const ownIds = new Set(items().map((a) => a.anilistId).filter(Boolean));
-    const ownTitles = new Set(items().flatMap((a) => [a.title, a.originalTitle]).filter(Boolean).map((s) => s.toLowerCase()));
+    const own = ownSets();
+    const isOwn = (r) => own.ids.has(r.id) || recNames(r).some((n) => own.names.some((o) => relatedName(n, o)));
     const agg = new Map();
     for (const a of seeds()) {
       for (const r of recs.get(a.anilistId) || []) {
-        if (ownIds.has(r.id) || ownTitles.has(r.title.toLowerCase()) || ownTitles.has((r.romaji || '').toLowerCase())) continue;
+        if (isOwn(r)) continue;
         const e = agg.get(r.id) || { ...r, points: 0, because: [] };
         // що частіше тайтл радять до різних ваших тайтлів і що більше голосів, то вище
         e.points += Math.log2(2 + r.votes);
@@ -968,7 +998,15 @@ function recsView() {
         agg.set(r.id, e);
       }
     }
-    return [...agg.values()].sort((x, y) => y.points - x.points).slice(0, 40);
+    // з однієї франшизи («86» і «86 Part 2») лишаємо одну картку — ту, що вище
+    const kept = [];
+    for (const r of [...agg.values()].sort((x, y) => y.points - x.points)) {
+      const twin = kept.find((k) => recNames(r).some((n) => recNames(k).some((m) => relatedName(n, m))));
+      if (twin) { twin.because = [...new Set([...twin.because, ...r.because])]; continue; }
+      kept.push(r);
+      if (kept.length >= 40) break;
+    }
+    return kept;
   }
 
   const card = (r) => {
@@ -1039,6 +1077,7 @@ function recsView() {
 
   render();
   load();
+  ensureFranchises(true); // щоб відкидати і продовження / фільми тайтлів зі списку
   return self;
 }
 

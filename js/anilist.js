@@ -115,13 +115,14 @@ export async function getRecommendations(ids, { force = false } = {}) {
   const todo = [];
   for (const id of new Set(ids)) {
     const c = readCache(`rec:${id}`);
-    if (!force && c && Date.now() - c.t < CACHE_HOURS * 4 * 3600e3) out.set(id, c.data);
+    // c.v — кеш зі старої версії без японських назв перезавантажуємо
+    if (!force && c?.v === 2 && Date.now() - c.t < CACHE_HOURS * 4 * 3600e3) out.set(id, c.data);
     else todo.push(id);
   }
   for (let i = 0; i < todo.length; i += 20) {
     const d = await gql(`query ($ids: [Int]) { Page(perPage: 20) { media(id_in: $ids, type: ANIME) { id
       recommendations(sort: RATING_DESC, perPage: 10) { nodes { rating mediaRecommendation {
-        id siteUrl format seasonYear episodes status averageScore isAdult genres title { romaji english } coverImage { large }
+        id siteUrl format seasonYear episodes status averageScore isAdult genres title { romaji english native } coverImage { large }
       } } } } } }`, { ids: todo.slice(i, i + 20) });
     for (const m of d.Page.media) {
       const recs = m.recommendations.nodes
@@ -132,6 +133,7 @@ export async function getRecommendations(ids, { force = false } = {}) {
           url: r.siteUrl,
           title: r.title.english || r.title.romaji,
           romaji: r.title.romaji,
+          native: r.title.native,
           cover: r.coverImage?.large || '',
           format: r.format,
           year: r.seasonYear,
@@ -141,7 +143,7 @@ export async function getRecommendations(ids, { force = false } = {}) {
           genres: r.genres || [],
         }));
       out.set(m.id, recs);
-      writeCache(`rec:${m.id}`, { t: Date.now(), data: recs });
+      writeCache(`rec:${m.id}`, { v: 2, t: Date.now(), data: recs });
     }
   }
   return out;
