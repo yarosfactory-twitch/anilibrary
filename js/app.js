@@ -63,7 +63,9 @@ function fmtWhen(at, dateOnly) {
   const day = new Date(d); day.setHours(0, 0, 0, 0);
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const days = Math.round((day - today) / 864e5);
-  let s = d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
+  // рік показуємо, якщо дата не в поточному році: «19 липня 2025»
+  const year = d.getFullYear() !== today.getFullYear() ? 'numeric' : undefined;
+  let s = d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long', year }).replace(/\s*р\.$/, '');
   if (!dateOnly) s += `, ${d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })}`;
   const rel = days === 0 ? 'сьогодні' : days === 1 ? 'завтра' : days > 1 ? `через ${days} ${plural(days, 'день', 'дні', 'днів')}` : '';
   return rel ? `${s} (${rel})` : s;
