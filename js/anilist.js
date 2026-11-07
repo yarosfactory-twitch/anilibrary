@@ -233,10 +233,10 @@ export async function searchAnilist(q) {
 }
 
 // Автоматичний підбір запису за назвами з TMDB. Перевага — серіал того ж року (зазвичай 1 сезон).
-export async function matchAnilist(names, year) {
+export async function matchAnilist(names, year, formats = SERIES) {
   for (const name of [...new Set(names.filter(Boolean))]) {
     const list = await searchAnilist(name).catch(() => []);
-    const series = list.filter((m) => SERIES.includes(m.format));
+    const series = list.filter((m) => formats.includes(m.format));
     const pick = series.find((m) => year && m.year === year) || series[0];
     if (pick) return pick.id;
   }

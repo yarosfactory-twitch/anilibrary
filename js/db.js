@@ -55,10 +55,13 @@ export const saveAnime = (id, data) => setDoc(doc(col, id), data);
 export const patchAnime = (id, data) => updateDoc(doc(col, id), { ...data, updatedAt: Date.now() });
 export const removeAnime = (id) => deleteDoc(doc(col, id));
 
+// id документа: серіал — tmdbId, фільм — movie-<tmdbId> (id фільмів і серіалів у TMDB перетинаються)
+export const docIdOf = (item) => (item.type === 'movie' ? `movie-${item.tmdbId}` : String(item.tmdbId));
+
 export async function importAnime(list) {
   for (let i = 0; i < list.length; i += 400) {
     const batch = writeBatch(db);
-    for (const item of list.slice(i, i + 400)) batch.set(doc(col, String(item.tmdbId)), item);
+    for (const item of list.slice(i, i + 400)) batch.set(doc(col, docIdOf(item)), item);
     await batch.commit();
   }
 }

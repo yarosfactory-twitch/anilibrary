@@ -14,9 +14,55 @@ async function get(path, params = {}) {
 
 export const posterUrl = (path, size = 'w342') => (path ? `https://image.tmdb.org/t/p/${size}${path}` : '');
 
-export async function searchTv(query) {
-  const data = await get('/search/tv', { query, language: 'uk-UA', include_adult: 'false' });
-  return data.results || [];
+// Пошук серіалів і фільмів одним запитом; результати зводимо до спільного вигляду.
+export async function searchMulti(query) {
+  const data = await get('/search/multi', { query, language: 'uk-UA', include_adult: 'false' });
+  return (data.results || [])
+    .filter((r) => r.media_type === 'tv' || r.media_type === 'movie')
+    .map((r) => {
+      const movie = r.media_type === 'movie';
+      return {
+        mediaType: r.media_type,
+        id: r.id,
+        name: movie ? r.title : r.name,
+        originalName: movie ? r.original_title : r.original_name,
+        date: (movie ? r.release_date : r.first_air_date) || '',
+        poster_path: r.poster_path,
+        overview: r.overview || '',
+        genre_ids: r.genre_ids || [],
+      };
+    });
+}
+
+// Деталі фільму (назва й опис українською, інакше англійською), кеш як для серіалів.
+export async function getMovie(id) {
+  const key = `tmdb:movie:${id}`;
+  try {
+    const c = JSON.parse(localStorage.getItem(key));
+    if (c && Date.now() - c.t < CACHE_HOURS * 3600e3) return c.data;
+  } catch { /* немає кешу */ }
+  const d = await get(`/movie/${id}`, { language: 'uk-UA' });
+  let name = d.title;
+  let { overview } = d;
+  if (!overview || name === d.original_title) {
+    try {
+      const en = await get(`/movie/${id}`, { language: 'en-US' });
+      overview ||= en.overview;
+      if (name === d.original_title && en.title) name = en.title;
+    } catch { /* лишаємо як є */ }
+  }
+  const data = {
+    id: d.id,
+    name,
+    originalName: d.original_title,
+    overview: overview || '',
+    poster: d.poster_path || null,
+    year: Number((d.release_date || '').slice(0, 4)) || null,
+    runtime: d.runtime || null,
+    status: d.status,
+  };
+  try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), data })); } catch { /* переповнено */ }
+  return data;
 }
 
 // Спецвипуски (сезон 0) ігноруємо: вони ламають порівняння прогресу.

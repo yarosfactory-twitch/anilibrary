@@ -1,5 +1,7 @@
 import * as cfg from './config.js';
-import { searchTv, getTv, peekTv, clearTvCache, posterUrl, cmpEp, nextEp, countNew } from './tmdb.js';
+import {
+  searchMulti, getTv, getMovie, peekTv, clearTvCache, posterUrl, cmpEp, nextEp, countNew,
+} from './tmdb.js';
 import {
   getAnilist, peekAnilist, searchAnilist, matchAnilist, clearAnilistCache, getAiring, getRecommendations,
   getFranchise, peekFranchise,
@@ -121,7 +123,9 @@ function fail(e) {
 }
 
 const items = () => [...state.items.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-const activeItems = () => items().filter((a) => ACTIVE.includes(a.status));
+const isMovie = (a) => a.type === 'movie';
+// тайтли, для яких стежимо за серіями (фільми сюди не входять)
+const activeItems = () => items().filter((a) => !isMovie(a) && ACTIVE.includes(a.status));
 const patch = (id, data) => db.patchAnime(id, data).catch(fail);
 
 // змінюємо локально одразу (щоб інтерфейс не чекав відповіді) і пишемо в Firestore
@@ -146,6 +150,7 @@ const alFor = (id) => cached(state.al, id, peekAnilist);
 // Немає: дані TMDB, прогрес порівнюється як пара (сезон, серія).
 
 function scheduleFor(a, progress = a.progress) {
+  if (isMovie(a)) return null;
   if (a.anilistId) {
     const al = alFor(a.anilistId);
     if (!al) return null;
@@ -189,7 +194,7 @@ function setFranchise(data) {
 }
 
 function franchiseOf(a) {
-  if (!a.anilistId) return null;
+  if (!a.anilistId || isMovie(a)) return null;
   const list = cached(state.fr, a.anilistId, peekFranchise);
   const byId = new Map((list || []).map((n) => [n.id, n]));
   const cur = byId.get(a.anilistId);
@@ -220,7 +225,7 @@ function franchiseOf(a) {
 }
 
 function nextSeasonOf(a) {
-  if (!a.anilistId) return null;
+  if (!a.anilistId || isMovie(a)) return null;
   const f = franchiseOf(a);
   return f?.chain[f.curIdx + 1] || alFor(a.anilistId)?.sequel || null;
 }
@@ -245,7 +250,7 @@ let frRunning = false;
 async function ensureFranchises() {
   if (frRunning) return;
   frRunning = true;
-  const list = items().filter((a) => a.anilistId && ['watching', 'waiting', 'completed'].includes(a.status));
+  const list = items().filter((a) => a.anilistId && !isMovie(a) && ['watching', 'waiting', 'completed'].includes(a.status));
   for (const a of list) {
     try { setFranchise(await getFranchise(a.anilistId)); } catch (e) { console.warn('franchise:', e); break; }
   }
@@ -258,6 +263,7 @@ const hasNew = (a) => ACTIVE.includes(a.status) && scheduleFor(a)?.fresh > 0;
 
 // роки виходу серіалу з TMDB: «2005–2008», «2012–…» (ще виходить) або «2019»
 function yearsOf(a) {
+  if (isMovie(a)) return a.year ? String(a.year) : '';
   const tv = tvFor(a.tmdbId);
   if (!tv?.firstYear) return '';
   if (tv.status === 'Returning Series' || tv.status === 'In Production') return `${tv.firstYear}–…`;
@@ -267,7 +273,8 @@ function yearsOf(a) {
 // фоново підтягуємо дані TMDB (роки) для тайтлів, яких ще немає в кеші
 const metaTried = new Set();
 function ensureTvMeta(list) {
-  const ids = list.map((a) => a.tmdbId).filter((id) => !metaTried.has(id) && !tvFor(id)?.firstYear);
+  const ids = list.filter((a) => !isMovie(a)).map((a) => a.tmdbId)
+    .filter((id) => !metaTried.has(id) && !tvFor(id)?.firstYear);
   if (!ids.length) return;
   ids.forEach((id) => metaTried.add(id));
   Promise.allSettled(ids.map((id) => getTv(id).then((tv) => state.tv.set(id, tv))))
@@ -569,7 +576,7 @@ function home() {
 
     // OVA / фільми / спешали поблизу вашого сезону, які ще не переглянуті
     const extras = items()
-      .filter((a) => a.anilistId && ['watching', 'waiting', 'completed'].includes(a.status))
+      .filter((a) => a.anilistId && !isMovie(a) && ['watching', 'waiting', 'completed'].includes(a.status))
       .flatMap((a) => pendingExtras(a).map((n) => ({ a, n })))
       .slice(0, 12);
     const extraRow = ({ a, n }) => `<a class="row-item" href="#/anime/${esc(a.id)}">
@@ -623,6 +630,7 @@ function listView(arg) {
 
   function card(a) {
     const meta = [
+      isMovie(a) ? 'фільм' : '',
       yearsOf(a),
       state.listStatus === 'all' ? STATUSES[a.status] : '',
       a.progress.episode > 0 ? fmtEp(a.progress) : '',
@@ -929,6 +937,7 @@ function detail(id) {
     $app.innerHTML = '<p class="empty">Тайтл не знайдено. <a href="#/list">До списків</a></p>';
     return self;
   }
+  if (isMovie(a0)) return movieDetail(id);
   const item = () => state.items.get(id) || a0;
   const ro = !state.canEdit;
   let prog = { ...a0.progress };
@@ -1297,6 +1306,83 @@ function detail(id) {
   return self;
 }
 
+// ---------- картка фільму: без сезонів і серій
+
+function movieDetail(id) {
+  const self = { name: 'anime' };
+  const a = state.items.get(id);
+  const ro = !state.canEdit;
+  const runtime = a.runtime ? `${Math.floor(a.runtime / 60)} год ${a.runtime % 60} хв` : '';
+  const sub = [a.originalTitle && a.originalTitle !== a.title ? a.originalTitle : '', a.year, runtime].filter(Boolean).join(' · ');
+  const statuses = STATUS_KEYS.filter((s) => s !== 'waiting');
+  const doneBtn = () => (a.status === 'completed'
+    ? '<button class="btn wide on" id="m-done">✓ Переглянуто</button>'
+    : '<button class="btn primary wide" id="m-done">Позначити переглянутим</button>');
+
+  $app.innerHTML = `<div class="detail">
+    <div class="detail-head">
+      ${posterImg(a.poster)}
+      <div class="detail-info">
+        <h1>${esc(a.title)}</h1>
+        ${sub ? `<div class="muted">${esc(sub)}</div>` : ''}
+        <div class="badges"><span class="badge">фільм</span><span class="badge" id="d-badge">${STATUSES[a.status]}</span>
+          <span class="badge priv" id="d-priv"${a.private ? '' : ' hidden'}>🔒 тільки для мене</span></div>
+        ${safeUrl(a.watchUrl) ? `<a class="btn primary" id="d-watch" href="${esc(a.watchUrl)}" target="_blank" rel="noopener">▶ Дивитись</a>` : ''}
+      </div>
+    </div>
+    ${ro ? '' : `<div id="m-done-box">${doneBtn()}</div>
+      <section class="panel"><h2>Статус</h2><div class="seg" id="d-status">${statuses.map((s) =>
+        `<button class="tab${s === a.status ? ' on' : ''}" data-s="${s}">${STATUSES[s]}</button>`).join('')}</div></section>
+      <section class="panel"><h2>Де дивлюсь</h2>
+        <input class="input" type="url" id="d-url" placeholder="https://…" value="${esc(a.watchUrl)}"></section>
+      <section class="panel"><h2>Видимість</h2>
+        <label class="check"><input type="checkbox" id="d-private"${a.private ? ' checked' : ''}> 🔒 Тільки для мене</label></section>`}
+    <section class="panel"><h2>Опис</h2><p class="overview">${esc(a.overview) || 'Опису немає.'}</p>
+      ${a.anilistId ? `<p class="mt"><a href="https://anilist.co/anime/${a.anilistId}" target="_blank" rel="noopener">Відкрити на AniList</a></p>` : ''}</section>
+    ${ro ? '' : '<button class="btn danger wide" id="d-delete">Видалити фільм</button>'}
+  </div>`;
+
+  if (ro) return self;
+  const $ = (sel) => $app.querySelector(sel);
+
+  function setStatus(s) {
+    a.status = s;
+    localPatch(id, { status: s });
+    $('#d-badge').textContent = STATUSES[s];
+    $app.querySelectorAll('#d-status .tab').forEach((x) => x.classList.toggle('on', x.dataset.s === s));
+    $('#m-done-box').innerHTML = doneBtn();
+  }
+
+  $('#m-done-box').onclick = (e) => {
+    if (!e.target.closest('#m-done')) return;
+    setStatus(a.status === 'completed' ? 'planned' : 'completed');
+    toast(a.status === 'completed' ? 'Фільм переглянуто' : 'Фільм у «Заплановано»');
+  };
+  $('#d-status').onclick = (e) => {
+    const b = e.target.closest('[data-s]');
+    if (b && b.dataset.s !== a.status) setStatus(b.dataset.s);
+  };
+  $('#d-url').onchange = (e) => {
+    const url = e.target.value.trim();
+    if (url && !safeUrl(url)) return toast('Посилання має починатися з http:// або https://');
+    localPatch(id, { watchUrl: url });
+    toast('Посилання збережено');
+    rerender();
+  };
+  $('#d-private').onchange = (e) => {
+    localPatch(id, { private: e.target.checked });
+    $('#d-priv').hidden = !e.target.checked;
+    toast(e.target.checked ? 'Фільм приховано: бачите лише ви' : 'Фільм видно в режимі перегляду');
+  };
+  $('#d-delete').onclick = () => {
+    if (!confirm(`Видалити «${a.title}» зі списку?`)) return;
+    db.removeAnime(id).catch(fail);
+    state.items.delete(id);
+    location.hash = '#/list';
+  };
+  return self;
+}
+
 // ---------- додавання
 
 function addView() {
@@ -1318,17 +1404,18 @@ function addView() {
   const $res = $app.querySelector('#a-results');
 
   const resultCard = (r) => {
-    const year = (r.first_air_date || '').slice(0, 4);
-    const sub = [r.original_name !== r.name ? r.original_name : '', year].filter(Boolean).join(' · ');
+    const sub = [r.mediaType === 'movie' ? 'фільм' : 'серіал', r.date.slice(0, 4),
+      r.originalName !== r.name ? r.originalName : ''].filter(Boolean).join(' · ');
+    const docId = resultDocId(r);
     return `<article class="result">
       ${posterImg(posterUrl(r.poster_path, 'w185'))}
       <div class="result-body">
         <div class="result-title">${esc(r.name)}</div>
-        ${sub ? `<div class="muted small">${esc(sub)}</div>` : ''}
+        <div class="muted small">${esc(sub)}</div>
         <p class="clip small">${esc(r.overview)}</p>
-        ${state.items.has(String(r.id))
-          ? `<a class="btn sm" href="#/anime/${r.id}">Вже у списку →</a>`
-          : `<button class="btn primary sm" data-add="${r.id}">Додати</button>`}
+        ${state.items.has(docId)
+          ? `<a class="btn sm" href="#/anime/${esc(docId)}">Вже у списку →</a>`
+          : `<button class="btn primary sm" data-add="${esc(docId)}">Додати</button>`}
       </div>
     </article>`;
   };
@@ -1345,7 +1432,7 @@ function addView() {
     state.addQuery = q;
     if (!state.addResults?.length) $res.innerHTML = '<div class="loader"></div>';
     try {
-      const results = await searchTv(q);
+      const results = await searchMulti(q);
       if (seq !== searchSeq || view !== self) return; // прийшла відповідь на старіший запит
       // аніме (жанр «Анімація») — нагору
       results.sort((x, y) => (y.genre_ids?.includes(16) ? 1 : 0) - (x.genre_ids?.includes(16) ? 1 : 0));
@@ -1393,7 +1480,7 @@ function addView() {
     if (!b) return;
     b.disabled = true;
     b.textContent = 'Додаю…';
-    const r = state.addResults.find((x) => String(x.id) === b.dataset.add);
+    const r = state.addResults.find((x) => resultDocId(x) === b.dataset.add);
     const id = await addAnime(r, state.addStatus, state.addPrivate);
     location.hash = `#/anime/${id}`;
   };
@@ -1402,20 +1489,24 @@ function addView() {
   return self;
 }
 
+const resultDocId = (r) => (r.mediaType === 'movie' ? `movie-${r.id}` : String(r.id));
+
 async function addAnime(r, status, isPrivate = false) {
+  if (r.mediaType === 'movie') return addMovie(r, status, isPrivate);
   const id = String(r.id);
   let tv = null;
   try { tv = await getTv(r.id); state.tv.set(r.id, tv); } catch (e) { console.warn(e); }
-  const year = Number((r.first_air_date || '').slice(0, 4)) || null;
+  const year = Number(r.date.slice(0, 4)) || null;
   let anilistId = null;
-  try { anilistId = await matchAnilist([r.original_name, tv?.name, r.name], year); } catch (e) { console.warn(e); }
+  try { anilistId = await matchAnilist([r.originalName, tv?.name, r.name], year); } catch (e) { console.warn(e); }
 
   const now = Date.now();
   const data = {
+    type: 'tv',
     tmdbId: r.id,
     anilistId,
     title: tv?.name || r.name,
-    originalTitle: tv?.originalName || r.original_name || '',
+    originalTitle: tv?.originalName || r.originalName || '',
     poster: posterUrl(tv?.poster || r.poster_path),
     overview: tv?.overview || r.overview || '',
     status,
@@ -1427,6 +1518,38 @@ async function addAnime(r, status, isPrivate = false) {
     updatedAt: now,
   };
   // не чекаємо підтвердження сервера: Firestore одразу запише локально (працює й офлайн)
+  db.saveAnime(id, data).catch(fail);
+  state.items.set(id, { id, ...data });
+  return id;
+}
+
+async function addMovie(r, status, isPrivate) {
+  const id = `movie-${r.id}`;
+  let mv = null;
+  try { mv = await getMovie(r.id); } catch (e) { console.warn(e); }
+  const year = Number(r.date.slice(0, 4)) || mv?.year || null;
+  let anilistId = null; // для порад
+  try { anilistId = await matchAnilist([r.originalName, mv?.name, r.name], year, ['MOVIE']); } catch (e) { console.warn(e); }
+
+  const now = Date.now();
+  const data = {
+    type: 'movie',
+    tmdbId: r.id,
+    anilistId,
+    title: mv?.name || r.name,
+    originalTitle: mv?.originalName || r.originalName || '',
+    poster: posterUrl(mv?.poster || r.poster_path),
+    overview: mv?.overview || r.overview || '',
+    year,
+    runtime: mv?.runtime || null,
+    status: status === 'waiting' ? 'planned' : status, // «чекаю сезон» для фільму не має сенсу
+    progress: { season: 1, episode: 0 },
+    watchUrl: '',
+    watchedExtras: [],
+    private: !!isPrivate,
+    addedAt: now,
+    updatedAt: now,
+  };
   db.saveAnime(id, data).catch(fail);
   state.items.set(id, { id, ...data });
   return id;
@@ -1504,7 +1627,10 @@ function normalize(x) {
   const tmdbId = posInt(x?.tmdbId);
   if (!tmdbId) return null;
   const int = (v, d) => (Number.isInteger(Number(v)) && Number(v) >= 0 ? Number(v) : d);
+  const type = x.type === 'movie' ? 'movie' : 'tv';
   return {
+    type,
+    ...(type === 'movie' ? { year: posInt(x.year), runtime: posInt(x.runtime) } : {}),
     tmdbId,
     anilistId: posInt(x.anilistId),
     title: String(x.title || ''),
