@@ -929,6 +929,49 @@ function calendarView() {
   return self;
 }
 
+// ---------- відповідність «запис AniList → тайтл TMDB» (для українських назв у порадах), кеш на 2 тижні
+
+const tmdbMapKey = (id) => `tmdbmap:${id}`;
+function peekTmdbMap(id) {
+  try {
+    const c = JSON.parse(localStorage.getItem(tmdbMapKey(id)));
+    return c && Date.now() - c.t < 14 * 864e5 ? c : null;
+  } catch { return null; }
+}
+function saveTmdbMap(id, data) {
+  try { localStorage.setItem(tmdbMapKey(id), JSON.stringify({ t: Date.now(), data })); } catch { /* переповнено */ }
+}
+
+// Підбір тайтлу на TMDB за назвами з AniList. Спершу шукаємо аніме того ж року за всіма назвами
+// (на «ONE PIECE» TMDB не віддає аніме 1999 року, а на «ワンピース» — віддає), і лише потім
+// беремо перший аніме-результат (для пізніших сезонів рік не збігається з роком серіалу).
+async function pickTmdb(names, type, year) {
+  const queries = [...new Set(names.filter(Boolean).map((n) => parseSeasonQuery(n.normalize('NFKC')).base))].slice(0, 4);
+  let fallback = null;
+  for (const q of queries) {
+    const typed = (await searchMulti(q)).filter((x) => x.mediaType === type);
+    const anime = typed.filter((x) => x.genre_ids.includes(16));
+    const exact = year && anime.find((x) => Number(x.date.slice(0, 4)) === year);
+    if (exact) return exact;
+    fallback ||= anime[0] || typed[0] || null;
+  }
+  return fallback;
+}
+
+// null — на TMDB не знайдено; помилка мережі — виняток (тоді не кешуємо)
+async function findTmdbFor(r) {
+  const pick = await pickTmdb([r.title, r.romaji, r.native], r.format === 'MOVIE' ? 'movie' : 'tv', r.year);
+  if (!pick) return null;
+  let { name, overview } = pick;
+  // у результатах пошуку англійська назва — дотягуємо українську зі сторінки тайтлу
+  if (!/[а-яіїєґ]/i.test(name)) {
+    const d = pick.mediaType === 'movie' ? await getMovie(pick.id) : await getTv(pick.id);
+    name = d.name;
+    overview = d.overview;
+  }
+  return { id: pick.id, mediaType: pick.mediaType, name, overview };
+}
+
 // ---------- рекомендації
 
 function recsView() {
@@ -1009,20 +1052,27 @@ function recsView() {
     return kept;
   }
 
+  // українська назва й опис з TMDB, якщо там є переклад; інакше — англійські з AniList
+  const isUk = (s) => /[а-яіїєґ]/i.test(s || '');
   const card = (r) => {
-    const meta = [r.format, r.year, r.episodes ? `${r.episodes} сер.` : '', r.score ? `${r.score}%` : '',
+    const tm = peekTmdbMap(r.id)?.data;
+    const ukName = isUk(tm?.name) ? tm.name : '';
+    const overview = isUk(tm?.overview) ? tm.overview : r.description || '';
+    const meta = [FORMAT_UK[r.format] || r.format, r.year, r.episodes ? `${r.episodes} сер.` : '', r.score ? `${r.score}%` : '',
       r.status === 'RELEASING' ? 'виходить' : r.status === 'NOT_YET_RELEASED' ? 'анонс' : ''].filter(Boolean).join(' · ');
     const because = r.because.slice(0, 2).join(', ') + (r.because.length > 2 ? ` і ще ${r.because.length - 2}` : '');
     const genres = r.genres.map((g) => GENRES_UK[g]).filter(Boolean).slice(0, 3);
     return `<article class="result">
       ${posterImg(r.cover)}
       <div class="result-body">
-        <div class="result-title">${esc(r.title)}</div>
+        <div class="result-title">${esc(ukName || r.title)}</div>
+        ${ukName ? `<div class="small muted">${esc(r.title)}</div>` : ''}
         <div class="muted small">${esc(meta)}</div>
         ${genres.length ? `<div class="chips">${genres.map((g) => `<span class="chip">${g}</span>`).join('')}</div>` : ''}
+        ${overview ? `<p class="clip small">${esc(overview)}</p>` : ''}
         <p class="small muted because">Бо ви дивились: ${esc(because)}</p>
         <div class="row">
-          ${state.canEdit ? `<button class="btn primary sm" data-rec-add="${esc(r.title)}">Додати</button>
+          ${state.canEdit ? `<button class="btn primary sm" data-rec-add="${r.id}">Додати</button>
             <button class="btn sm" data-rec-later="${r.id}">+ Пізніше</button>` : ''}
           <a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">AniList</a>
         </div>
@@ -1066,13 +1116,38 @@ function recsView() {
       }
       const b = e.target.closest('[data-rec-add]');
       if (!b) return;
-      // назву шукаємо на TMDB, щоб тайтл мав українську назву й опис
-      state.addQuery = b.dataset.recAdd;
-      state.addResults = null;
-      state.addAutoSearch = true;
-      state.addStatus = 'planned';
-      location.hash = '#/add';
+      // додаємо одразу: сайт сам знайде тайтл на TMDB (українська назва й опис)
+      b.disabled = true;
+      b.textContent = 'Додаю…';
+      try {
+        const id = await addFromAnilist(list.find((x) => String(x.id) === b.dataset.recAdd), 'planned', false);
+        location.hash = `#/anime/${id}`;
+      } catch (err) {
+        toast(err.message);
+        b.disabled = false;
+        b.textContent = 'Додати';
+      }
     });
+    fillTmdb(list);
+  }
+
+  // фоново зіставляємо поради з TMDB (по кілька за раз), перемальовуючи сторінку після кожної порції
+  let mapping = false;
+  async function fillTmdb(list) {
+    if (mapping) return;
+    const todo = list.filter((r) => !peekTmdbMap(r.id));
+    if (!todo.length) return;
+    mapping = true;
+    for (let i = 0; i < todo.length; i += 6) {
+      await Promise.all(todo.slice(i, i + 6).map(async (r) => {
+        try { saveTmdbMap(r.id, await findTmdbFor(r)); } catch (e) { console.warn('tmdb map:', e); }
+      }));
+      if (view !== self) break;
+      const y = window.scrollY;
+      render();
+      window.scrollTo(0, y);
+    }
+    mapping = false;
   }
 
   render();
@@ -1772,24 +1847,20 @@ async function addFromAnilist(m, status, isPrivate) {
   const movie = m.format === 'MOVIE';
   let season = 1;
   let names = [m.title, m.romaji, m.native];
+  let year = m.year;
   if (!movie) {
     try {
       setFranchise(await getFranchise(m.id));
       const f = franchiseOf({ anilistId: m.id, type: 'tv' });
       if (f) {
         season = f.curIdx + 1;
-        names = [f.chain[0].title, ...names]; // назва першого сезону зазвичай і є назвою серіалу на TMDB
+        // назва й рік першого сезону зазвичай і є назвою / роком серіалу на TMDB
+        names = [f.chain[0].title, ...names];
+        year = f.chain[0].year || year;
       }
     } catch (e) { console.warn(e); }
   }
-  const type = movie ? 'movie' : 'tv';
-  const queries = [...new Set(names.filter(Boolean).map((n) => parseSeasonQuery(n.normalize('NFKC')).base))].slice(0, 5);
-  let r = null;
-  for (const q of queries) {
-    const res = await searchMulti(q).catch(() => []);
-    r = res.find((x) => x.mediaType === type && x.genre_ids.includes(16)) || res.find((x) => x.mediaType === type);
-    if (r) break;
-  }
+  const r = await pickTmdb(names, movie ? 'movie' : 'tv', year).catch(() => null);
   if (!r) throw new Error('Цього тайтлу немає на TMDB, тому додати його поки не вийде');
 
   const docId = resultDocId(r);

@@ -14,11 +14,24 @@ async function get(path, params = {}) {
 
 export const posterUrl = (path, size = 'w342') => (path ? `https://image.tmdb.org/t/p/${size}${path}` : '');
 
-// Пошук серіалів і фільмів одним запитом; результати зводимо до спільного вигляду.
+// Пошук серіалів і фільмів; результати зводимо до спільного вигляду.
+// TMDB шукає лише мовою запиту й оригінальною назвою: з uk-UA запит «One Piece» не знаходить
+// аніме 1999 року (українською «Ван Піс»). Тому латинський запит шукаємо ще й en-US і об'єднуємо,
+// беручи українські поля там, де вони є.
 export async function searchMulti(query) {
-  const data = await get('/search/multi', { query, language: 'uk-UA', include_adult: 'false' });
-  return (data.results || [])
+  const params = { query, include_adult: 'false' };
+  const latin = !/[а-яіїєґ]/i.test(query);
+  const [uk, en] = await Promise.all([
+    get('/search/multi', { ...params, language: 'uk-UA' }),
+    latin ? get('/search/multi', { ...params, language: 'en-US' }) : null,
+  ]);
+  const ukById = new Map((uk.results || []).map((r) => [`${r.media_type}:${r.id}`, r]));
+  const order = latin ? [...(en.results || []), ...(uk.results || [])] : uk.results || [];
+  const seen = new Set();
+  return order
     .filter((r) => r.media_type === 'tv' || r.media_type === 'movie')
+    .filter((r) => { const k = `${r.media_type}:${r.id}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    .map((r) => ukById.get(`${r.media_type}:${r.id}`) || r)
     .map((r) => {
       const movie = r.media_type === 'movie';
       return {
