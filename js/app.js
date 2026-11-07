@@ -276,20 +276,33 @@ function ensureTvMeta(list) {
 
 // Межі прогресу за відомими даними: не можна переглянути більше серій, ніж є в сезоні.
 // null — межа невідома (немає даних або AniList ще не знає кількості серій).
+// Для тайтлів з AniList сезон = позиція запису в лінії сезонів франшизи (1, 2, 3…),
+// тож сезонів не більше, ніж у франшизі. Поки франшиза не завантажена, сезон не змінюємо.
 function limits(a, season) {
-  if (a.anilistId) return { maxSeason: null, maxEpisode: alFor(a.anilistId)?.episodes || null };
+  if (a.anilistId) {
+    const f = franchiseOf(a);
+    if (!f) {
+      const s = a.progress.season;
+      return { minSeason: s, maxSeason: s, maxEpisode: alFor(a.anilistId)?.episodes || null };
+    }
+    const node = f.chain[season - 1];
+    const episodes = node?.id === a.anilistId ? alFor(a.anilistId)?.episodes || node.episodes : node?.episodes;
+    return { minSeason: 1, maxSeason: f.chain.length, maxEpisode: episodes || null };
+  }
   const seasons = tvFor(a.tmdbId)?.seasons;
-  if (!seasons?.length) return { maxSeason: null, maxEpisode: null };
+  if (!seasons?.length) return { minSeason: 1, maxSeason: null, maxEpisode: null };
   return {
+    minSeason: 1,
     maxSeason: Math.max(...seasons.map((s) => s.season)),
     maxEpisode: seasons.find((s) => s.season === season)?.episodes || null,
   };
 }
 
 function clampProg(a, p) {
-  let season = Math.max(1, p.season | 0);
+  let season = p.season | 0;
   let episode = Math.max(0, p.episode | 0);
-  const { maxSeason } = limits(a, season);
+  const { minSeason, maxSeason } = limits(a, season);
+  season = Math.max(minSeason || 1, season);
   if (maxSeason && season > maxSeason) season = maxSeason;
   const { maxEpisode } = limits(a, season);
   if (maxEpisode && episode > maxEpisode) episode = maxEpisode;
@@ -984,9 +997,9 @@ function detail(id) {
   // вимикаємо «+» / «−», коли досягнуто меж
   function renderSteppers() {
     if (ro) return;
-    const { maxSeason, maxEpisode } = limits(item(), prog.season);
+    const { minSeason, maxSeason, maxEpisode } = limits(item(), prog.season);
     const btn = (key, d) => $app.querySelector(`[data-step="${key}"][data-d="${d}"]`);
-    btn('season', '-1').disabled = prog.season <= 1;
+    btn('season', '-1').disabled = prog.season <= (minSeason || 1);
     btn('season', '1').disabled = !!maxSeason && prog.season >= maxSeason;
     btn('episode', '-1').disabled = prog.episode <= 0;
     btn('episode', '1').disabled = !!maxEpisode && prog.episode >= maxEpisode;
@@ -997,10 +1010,14 @@ function detail(id) {
   // після свіжих даних TMDB / AniList виправляємо прогрес, що виходить за межі (напр. S3E25 при 21 серії)
   function fixProg() {
     if (ro || view !== self) return;
-    const fixed = clampProg(item(), prog);
+    const a = item();
+    let fixed = clampProg(a, prog);
+    // для AniList номер сезону має відповідати прив'язаному запису у франшизі
+    const f = a.anilistId && franchiseOf(a);
+    if (f && fixed.season !== f.curIdx + 1) fixed = clampProg(a, { season: f.curIdx + 1, episode: prog.episode });
     if (cmpEp(fixed, prog) !== 0) {
       setProg(fixed);
-      toast(`Прогрес виправлено на ${fmtEp(fixed)}: більше серій у сезоні немає`);
+      toast(`Прогрес виправлено на ${fmtEp(fixed)}`);
     }
   }
 
@@ -1148,7 +1165,7 @@ function detail(id) {
       })
       .catch((e) => { alErr = e.message; renderAl(); renderSched(); });
     getFranchise(a0.anilistId)
-      .then((data) => { setFranchise(data); renderFr(); renderAl(); })
+      .then((data) => { setFranchise(data); renderFr(); renderAl(); renderSched(); fixProg(); })
       .catch((e) => { frErr = `Не вдалося завантажити франшизу: ${e.message}`; renderFr(); });
   }
   queueMicrotask(() => { renderSched(); renderAl(); renderFr(); });
@@ -1165,7 +1182,19 @@ function detail(id) {
 
   // повертає новий статус, якщо він змінився автоматично (остання серія)
   function setProg(p) {
-    prog = clampProg(item(), p);
+    const next = clampProg(item(), p);
+    // AniList: зміна сезону = перехід на інший запис у лінії сезонів франшизи, серії з 0
+    const a = item();
+    const target = a.anilistId && next.season !== prog.season && franchiseOf(a)?.chain[next.season - 1];
+    if (target && target.id !== a.anilistId) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      localPatch(id, { anilistId: target.id, progress: { season: next.season, episode: 0 } });
+      toast(`Сезон ${next.season}: ${target.title}`);
+      rerender();
+      return null;
+    }
+    prog = next;
     $('#p-season').value = prog.season;
     $('#p-episode').value = prog.episode;
     item().progress = prog;
