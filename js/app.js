@@ -452,17 +452,50 @@ function onUser(user) {
   }, { publicOnly: !isOwner });
 }
 
+// Вбудовані браузери застосунків (Telegram, Instagram, Facebook…) часто не дають увійти через Google
+const IN_APP_BROWSER = /Telegram|Instagram|FBAN|FBAV|Line\/|; wv\)|TikTok|Snapchat/i.test(navigator.userAgent);
+
+function loginError(e) {
+  switch (e?.code) {
+    case 'auth/popup-blocked':
+      return 'Браузер заблокував вікно входу. Дозвольте спливаючі вікна для цього сайту (iPhone: Параметри → Safari → вимкніть «Блокувати спливні вікна») і натисніть «Увійти» ще раз.';
+    case 'auth/operation-not-supported-in-environment':
+    case 'auth/web-storage-unsupported':
+      return 'У цьому браузері вхід не працює. Відкрийте сайт у Safari або Chrome.';
+    case 'auth/unauthorized-domain':
+      return 'Цей домен не додано у Firebase → Authentication → Settings → Authorized domains.';
+    case 'auth/network-request-failed':
+      return 'Немає з\'єднання з інтернетом. Спробуйте ще раз.';
+    default:
+      return `Не вдалося увійти: ${e?.message || e}`;
+  }
+}
+
 function showLogin() {
   $app.innerHTML = `<div class="center-screen">
     <img src="icons/icon.svg" class="logo" alt="">
     <h1>Anilibrary</h1>
     <p class="muted">Особистий трекер аніме</p>
+    ${IN_APP_BROWSER ? `<p class="notice">Схоже, сайт відкрито всередині застосунку (Telegram, Instagram тощо).
+      Там вхід через Google часто не працює. Відкрийте сайт у Safari або Chrome: меню ⋯ → «Відкрити в браузері».</p>` : ''}
     <button class="btn primary" id="login">Увійти через Google</button>
+    <p class="notice" id="login-err" hidden></p>
+    <p class="hint">Відкриється вікно Google. Якщо нічого не сталося, дозвольте спливаючі вікна для сайту.</p>
   </div>`;
   const btn = $app.querySelector('#login');
+  const $err = $app.querySelector('#login-err');
   btn.onclick = async () => {
     btn.disabled = true;
-    try { await db.login(); } catch (e) { fail(e); } finally { btn.disabled = false; }
+    $err.hidden = true;
+    try {
+      await db.login();
+    } catch (e) {
+      console.error(e);
+      $err.textContent = loginError(e);
+      $err.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
   };
 }
 

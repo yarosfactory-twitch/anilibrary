@@ -1,7 +1,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
-  getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect,
-  getRedirectResult, onAuthStateChanged, signOut,
+  getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
@@ -16,11 +15,12 @@ const db = initializeFirestore(app, {
 });
 const col = collection(db, 'anime');
 
-getRedirectResult(auth).catch((e) => console.warn('redirect login:', e));
-
 export const watchAuth = (cb) => onAuthStateChanged(auth, cb);
 export const logout = () => signOut(auth);
 
+// Лише вхід через спливаюче вікно. signInWithRedirect на GitHub Pages не працює в Safari / iOS
+// (сайт і сторінка входу Firebase на різних доменах, браузер ізолює їхнє сховище —
+// «missing initial state»). Помилки віддаємо наверх, щоб пояснити користувачу, що робити.
 export async function login() {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
@@ -28,9 +28,6 @@ export async function login() {
     await signInWithPopup(auth, provider);
   } catch (e) {
     if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') return;
-    if (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-environment') {
-      return signInWithRedirect(auth, provider);
-    }
     throw e;
   }
 }
