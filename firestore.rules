@@ -1,0 +1,23 @@
+rules_version = '2';
+
+// Вставте ті самі uid, що й у js/config.js (OWNER_UID і READER_UID).
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner() {
+      return request.auth != null && request.auth.uid == 'OWNER_UID_ТУТ';
+    }
+    function isReader() {
+      return request.auth != null && request.auth.uid == 'READER_UID_ТУТ';
+    }
+
+    match /anime/{animeId} {
+      allow read: if isOwner() || isReader();
+      allow write: if isOwner();
+    }
+
+    // Усе інше заборонено.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
