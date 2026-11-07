@@ -897,22 +897,45 @@ function addView() {
     else $res.innerHTML = state.addResults.length ? state.addResults.map(resultCard).join('') : '<p class="empty">Нічого не знайдено.</p>';
   };
 
-  $app.querySelector('#a-form').onsubmit = async (e) => {
-    e.preventDefault();
-    const q = $q.value.trim();
-    if (!q) return;
+  let searchSeq = 0;
+  let typingTimer;
+  async function search(q) {
+    const seq = ++searchSeq;
     state.addQuery = q;
-    $q.blur();
-    $res.innerHTML = '<div class="loader"></div>';
+    if (!state.addResults?.length) $res.innerHTML = '<div class="loader"></div>';
     try {
       const results = await searchTv(q);
+      if (seq !== searchSeq || view !== self) return; // прийшла відповідь на старіший запит
       // аніме (жанр «Анімація») — нагору
       results.sort((x, y) => (y.genre_ids?.includes(16) ? 1 : 0) - (x.genre_ids?.includes(16) ? 1 : 0));
       state.addResults = results;
-      if (view === self) show();
+      show();
     } catch (err) {
-      if (view === self) $res.innerHTML = `<p class="notice">${esc(err.message)}</p>`;
+      if (seq === searchSeq && view === self) $res.innerHTML = `<p class="notice">${esc(err.message)}</p>`;
     }
+  }
+
+  // результати з'являються під час набору, з невеликою паузою
+  $q.oninput = () => {
+    clearTimeout(typingTimer);
+    const q = $q.value.trim();
+    if (q.length < 2) {
+      searchSeq++;
+      state.addQuery = q;
+      state.addResults = null;
+      show();
+      return;
+    }
+    typingTimer = setTimeout(() => search(q), 400);
+  };
+
+  $app.querySelector('#a-form').onsubmit = (e) => {
+    e.preventDefault();
+    clearTimeout(typingTimer);
+    const q = $q.value.trim();
+    if (!q) return;
+    $q.blur(); // ховаємо клавіатуру на телефоні
+    search(q);
   };
 
   $app.querySelector('#a-status').onchange = (e) => { state.addStatus = e.target.value; };
