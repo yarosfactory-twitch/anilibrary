@@ -1,5 +1,5 @@
 import * as cfg from './config.js';
-import { searchTv, getTv, peekTv, clearTvCache, posterUrl, nextEp, countNew } from './tmdb.js';
+import { searchTv, getTv, peekTv, clearTvCache, posterUrl, cmpEp, nextEp, countNew } from './tmdb.js';
 import { getAnilist, peekAnilist, searchAnilist, matchAnilist, clearAnilistCache, getAiring } from './anilist.js';
 
 const STATUSES = {
@@ -156,7 +156,37 @@ const isOut = (seq) => seq && (seq.status === 'RELEASING' || seq.status === 'FIN
 
 const hasNew = (a) => ACTIVE.includes(a.status) && scheduleFor(a)?.fresh > 0;
 
-const stepEp = (a, p) => (a.anilistId ? { ...p, episode: p.episode + 1 } : nextEp(p, tvFor(a.tmdbId)));
+// Межі прогресу за відомими даними: не можна переглянути більше серій, ніж є в сезоні.
+// null — межа невідома (немає даних або AniList ще не знає кількості серій).
+function limits(a, season) {
+  if (a.anilistId) return { maxSeason: null, maxEpisode: alFor(a.anilistId)?.episodes || null };
+  const seasons = tvFor(a.tmdbId)?.seasons;
+  if (!seasons?.length) return { maxSeason: null, maxEpisode: null };
+  return {
+    maxSeason: Math.max(...seasons.map((s) => s.season)),
+    maxEpisode: seasons.find((s) => s.season === season)?.episodes || null,
+  };
+}
+
+function clampProg(a, p) {
+  let season = Math.max(1, p.season | 0);
+  let episode = Math.max(0, p.episode | 0);
+  const { maxSeason } = limits(a, season);
+  if (maxSeason && season > maxSeason) season = maxSeason;
+  const { maxEpisode } = limits(a, season);
+  if (maxEpisode && episode > maxEpisode) episode = maxEpisode;
+  return { season, episode };
+}
+
+// наступна серія з урахуванням меж; null — далі серій немає
+function stepEp(a, p) {
+  const next = clampProg(a, a.anilistId ? { ...p, episode: p.episode + 1 } : nextEp(p, tvFor(a.tmdbId)));
+  return cmpEp(next, p) > 0 ? next : null;
+}
+
+const endMessage = (a) => (a.anilistId && alFor(a.anilistId)?.sequel
+  ? 'Сезон переглянуто: можна перейти на наступний'
+  : 'Це остання серія, що є');
 
 function startNextSeason(a, season = a.progress.season) {
   const seq = alFor(a.anilistId)?.sequel;
@@ -308,6 +338,7 @@ document.addEventListener('click', (e) => {
   if (!a) return;
   if (btn.dataset.act === 'plus1') {
     const progress = stepEp(a, a.progress);
+    if (!progress) return toast(endMessage(a));
     localPatch(a.id, { progress });
     toast(`Переглянуто ${fmtEp(progress)}`);
   } else if (btn.dataset.act === 'next-season') {
@@ -682,9 +713,33 @@ function detail(id) {
       ? `<a class="btn primary" href="${esc(url)}" target="_blank" rel="noopener">▶ Дивитись</a>` : '';
   }
 
+  // вимикаємо «+» / «−», коли досягнуто меж
+  function renderSteppers() {
+    if (ro) return;
+    const { maxSeason, maxEpisode } = limits(item(), prog.season);
+    const btn = (key, d) => $app.querySelector(`[data-step="${key}"][data-d="${d}"]`);
+    btn('season', '-1').disabled = prog.season <= 1;
+    btn('season', '1').disabled = !!maxSeason && prog.season >= maxSeason;
+    btn('episode', '-1').disabled = prog.episode <= 0;
+    btn('episode', '1').disabled = !!maxEpisode && prog.episode >= maxEpisode;
+    $('#p-season').max = maxSeason || '';
+    $('#p-episode').max = maxEpisode || '';
+  }
+
+  // після свіжих даних TMDB / AniList виправляємо прогрес, що виходить за межі (напр. S3E25 при 21 серії)
+  function fixProg() {
+    if (ro || view !== self) return;
+    const fixed = clampProg(item(), prog);
+    if (cmpEp(fixed, prog) !== 0) {
+      setProg(fixed);
+      toast(`Прогрес виправлено на ${fmtEp(fixed)}: більше серій у сезоні немає`);
+    }
+  }
+
   function renderSched() {
     if (view !== self) return;
     const a = item();
+    renderSteppers();
     const sch = scheduleFor(a, prog);
     if ($('#d-hint')) {
       $('#d-hint').textContent = a.anilistId
@@ -764,14 +819,14 @@ function detail(id) {
 
   renderWatch(a0.watchUrl);
   getTv(a0.tmdbId)
-    .then((t) => { state.tv.set(a0.tmdbId, t); renderSched(); })
+    .then((t) => { state.tv.set(a0.tmdbId, t); renderSched(); if (!item().anilistId) fixProg(); })
     .catch((e) => { tvErr = `Не вдалося завантажити TMDB: ${e.message}`; renderSched(); });
   if (a0.anilistId) {
     getAnilist([a0.anilistId])
       .then((m) => {
         m.forEach((v, k) => state.al.set(k, v));
         if (!m.size) alErr = 'Запис не знайдено на AniList';
-        renderAl(); renderSched();
+        renderAl(); renderSched(); fixProg();
       })
       .catch((e) => { alErr = e.message; renderAl(); renderSched(); });
   }
@@ -782,7 +837,7 @@ function detail(id) {
   // прогрес: оновлюємо поля одразу, а в Firestore пишемо з невеликою затримкою
   let saveTimer = null;
   function setProg(p) {
-    prog = { season: Math.max(0, p.season | 0), episode: Math.max(0, p.episode | 0) };
+    prog = clampProg(item(), p);
     $('#p-season').value = prog.season;
     $('#p-episode').value = prog.episode;
     item().progress = prog;
@@ -802,7 +857,12 @@ function detail(id) {
   });
   $('#p-season').onchange = (e) => setProg({ ...prog, season: +e.target.value });
   $('#p-episode').onchange = (e) => setProg({ ...prog, episode: +e.target.value });
-  $('#d-plus1').onclick = () => { setProg(stepEp(item(), prog)); toast(`Переглянуто ${fmtEp(prog)}`); };
+  $('#d-plus1').onclick = () => {
+    const next = stepEp(item(), prog);
+    if (!next) return toast(endMessage(item()));
+    setProg(next);
+    toast(`Переглянуто ${fmtEp(prog)}`);
+  };
 
   $('#d-al').onclick = (e) => {
     const act = e.target.closest('[data-al]')?.dataset.al;
