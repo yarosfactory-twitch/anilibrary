@@ -465,7 +465,6 @@ function listView(arg) {
     const meta = [
       state.listStatus === 'all' ? STATUSES[a.status] : '',
       a.progress.episode > 0 ? fmtEp(a.progress) : '',
-      a.rating ? `★ ${a.rating}` : '',
     ].filter(Boolean).join(' · ');
     return `<a class="card" href="#/anime/${esc(a.id)}">
       <div class="card-poster">${posterImg(a.poster)}${hasNew(a) ? '<span class="dot-new">нові</span>' : ''}</div>
@@ -666,9 +665,8 @@ function recsView() {
   let error = '';
   let loading = false;
 
-  // на що спираємось: переглянуте та те, що дивимось, з прив'язкою до AniList; низько оцінене (1–4) не враховуємо
-  const seeds = () => items().filter((a) => a.anilistId
-    && ['completed', 'watching', 'waiting'].includes(a.status) && !(a.rating && a.rating <= 4));
+  // на що спираємось: переглянуте та те, що дивимось, з прив'язкою до AniList
+  const seeds = () => items().filter((a) => a.anilistId && ['completed', 'watching', 'waiting'].includes(a.status));
 
   async function load(force = false) {
     loading = true;
@@ -694,11 +692,11 @@ function recsView() {
     const ownTitles = new Set(items().flatMap((a) => [a.title, a.originalTitle]).filter(Boolean).map((s) => s.toLowerCase()));
     const agg = new Map();
     for (const a of seeds()) {
-      const weight = a.rating ? a.rating / 5 : 1; // 10 → ×2, без оцінки → ×1
       for (const r of recs.get(a.anilistId) || []) {
         if (ownIds.has(r.id) || ownTitles.has(r.title.toLowerCase()) || ownTitles.has((r.romaji || '').toLowerCase())) continue;
         const e = agg.get(r.id) || { ...r, points: 0, because: [] };
-        e.points += weight * Math.log2(2 + r.votes);
+        // що частіше тайтл радять до різних ваших тайтлів і що більше голосів, то вище
+        e.points += Math.log2(2 + r.votes);
         if (!e.because.includes(a.title)) e.because.push(a.title);
         agg.set(r.id, e);
       }
@@ -739,8 +737,7 @@ function recsView() {
       ${error ? `<p class="notice">${esc(error)}</p>` : ''}
       ${!n ? `<p class="empty">Порад поки немає. Позначте тайтли як «Переглянуто» або «Дивлюсь»
           (з прив'язкою до AniList), і тут з'являться схожі.</p>`
-        : `<p class="muted small">На основі ${n} ${plural(n, 'тайтлу', 'тайтлів', 'тайтлів')} з вашого списку й оцінок глядачів AniList.
-            Ваша висока оцінка тайтлу підсилює схожі на нього.</p>
+        : `<p class="muted small">На основі ${n} ${plural(n, 'тайтлу', 'тайтлів', 'тайтлів')} з вашого списку й рекомендацій глядачів AniList.</p>
           ${list.length ? `<div class="results mt">${list.map(card).join('')}</div>` : '<p class="empty">Нічого нового: усе схоже вже у списку.</p>'}`}`;
 
     $app.querySelector('#r-refresh').onclick = () => { recs = null; render(); load(true); };
@@ -774,7 +771,6 @@ function detail(id) {
   const ro = !state.canEdit;
   let prog = { ...a0.progress };
   let status = a0.status;
-  let rating = a0.rating || null;
   let tvErr = '', alErr = '';
 
   const stepper = (key, label) => `<div>
@@ -785,8 +781,6 @@ function detail(id) {
       <button class="btn icon" data-step="${key}" data-d="1" aria-label="${label}: більше">+</button>
     </div></div>`;
 
-  const ratingBtns = () => Array.from({ length: 10 }, (_, i) => i + 1)
-    .map((n) => `<button data-r="${n}" class="${rating && n <= rating ? 'on' : ''}">${n}</button>`).join('');
 
   $app.innerHTML = `<div class="detail">
     <div class="detail-head">
@@ -795,7 +789,7 @@ function detail(id) {
         <h1>${esc(a0.title)}</h1>
         ${a0.originalTitle && a0.originalTitle !== a0.title ? `<div class="muted">${esc(a0.originalTitle)}</div>` : ''}
         <div class="badges"><span class="badge" id="d-badge">${STATUSES[status] || status}</span>
-          ${ro && rating ? `<span class="badge">★ ${rating}</span>` : ''}<span class="badges-air" id="d-air"></span></div>
+          <span class="badges-air" id="d-air"></span></div>
         <div id="d-watch"></div>
       </div>
     </div>
@@ -816,12 +810,6 @@ function detail(id) {
 
     ${ro ? '' : `<section class="panel"><h2>Де дивлюсь</h2>
       <input class="input" type="url" id="d-url" placeholder="https://…" value="${esc(a0.watchUrl)}"></section>`}
-
-    ${ro ? '' : `<section class="panel"><h2>Оцінка</h2><div class="rating" id="d-rating">${ratingBtns()}</div></section>`}
-
-    ${ro
-      ? (a0.note ? `<section class="panel"><h2>Нотатка</h2><p class="note-text">${esc(a0.note)}</p></section>` : '')
-      : `<section class="panel"><h2>Нотатка</h2><textarea class="input" id="d-note" placeholder="Думки, де зупинився, що дивитись далі…">${esc(a0.note)}</textarea></section>`}
 
     <section class="panel"><h2>Опис</h2><p class="overview">${esc(a0.overview) || 'Опису немає.'}</p></section>
 
@@ -1026,17 +1014,6 @@ function detail(id) {
     toast('Посилання збережено');
   };
 
-  $('#d-rating').onclick = (e) => {
-    const b = e.target.closest('[data-r]');
-    if (!b) return;
-    const n = Number(b.dataset.r);
-    rating = rating === n ? null : n;
-    localPatch(id, { rating });
-    $('#d-rating').innerHTML = ratingBtns();
-  };
-
-  $('#d-note').onchange = (e) => { localPatch(id, { note: e.target.value }); toast('Нотатку збережено'); };
-
   $('#d-delete').onclick = () => {
     if (!confirm(`Видалити «${a0.title}» зі списку?`)) return;
     clearTimeout(saveTimer);
@@ -1170,8 +1147,6 @@ async function addAnime(r, status) {
     status,
     progress: { season: 1, episode: 0 },
     watchUrl: '',
-    rating: null,
-    note: '',
     addedAt: now,
     updatedAt: now,
   };
@@ -1253,7 +1228,6 @@ function normalize(x) {
   const tmdbId = posInt(x?.tmdbId);
   if (!tmdbId) return null;
   const int = (v, d) => (Number.isInteger(Number(v)) && Number(v) >= 0 ? Number(v) : d);
-  const rating = Number(x.rating);
   return {
     tmdbId,
     anilistId: posInt(x.anilistId),
@@ -1264,8 +1238,6 @@ function normalize(x) {
     status: STATUSES[x.status] ? x.status : 'planned',
     progress: { season: int(x.progress?.season, 1), episode: int(x.progress?.episode, 0) },
     watchUrl: safeUrl(String(x.watchUrl || '')),
-    rating: Number.isInteger(rating) && rating >= 1 && rating <= 10 ? rating : null,
-    note: String(x.note || ''),
     addedAt: Number(x.addedAt) || Date.now(),
     updatedAt: Number(x.updatedAt) || Date.now(),
   };
