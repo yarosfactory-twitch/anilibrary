@@ -236,18 +236,26 @@ async function loadFranchise(id) {
   return data;
 }
 
+const shortOf = (m) => ({
+  id: m.id,
+  title: m.title.english || m.title.romaji,
+  romaji: m.title.romaji,
+  native: m.title.native,
+  format: m.format,
+  year: m.seasonYear,
+  episodes: m.episodes,
+  cover: m.coverImage?.medium || '',
+});
+
+// один запис за id (для вставленого посилання anilist.co/anime/<id>)
+export async function getAnilistShort(id) {
+  const data = await gql(`query ($id: Int) { Media(id: $id, type: ANIME) { ${SHORT} } }`, { id });
+  return data.Media ? shortOf(data.Media) : null;
+}
+
 export async function searchAnilist(q) {
   const data = await gql(`query ($q: String) { Page(perPage: 12) { media(search: $q, type: ANIME, sort: SEARCH_MATCH) { ${SHORT} } } }`, { q });
-  return data.Page.media.map((m) => ({
-    id: m.id,
-    title: m.title.english || m.title.romaji,
-    romaji: m.title.romaji,
-    native: m.title.native,
-    format: m.format,
-    year: m.seasonYear,
-    episodes: m.episodes,
-    cover: m.coverImage?.medium || '',
-  }));
+  return data.Page.media.map(shortOf);
 }
 
 // Автоматичний підбір запису за назвами з TMDB. Перевага — серіал того ж року (зазвичай 1 сезон).
