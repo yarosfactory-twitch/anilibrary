@@ -51,6 +51,7 @@ const state = {
   addQuery: '',
   addResults: null,
   addStatus: 'watching',
+  addPrivate: false,
   calMonth: null, // перше число місяця, що показує календар
   calDay: null, // вибраний день 'РРРР-ММ-ДД'
 };
@@ -394,6 +395,11 @@ function onUser(user) {
       route();
       ensureData(activeItems());
       ensureFranchises();
+      // одноразово: старим тайтлам без поля private ставимо «видно глядачу»
+      if (isOwner) {
+        const old = docs.filter((d) => typeof d.private !== 'boolean').map((d) => d.id);
+        if (old.length) db.markPublic(old).catch(fail);
+      }
     } else {
       view?.update?.();
     }
@@ -402,7 +408,7 @@ function onUser(user) {
     screen('Немає доступу', err.code === 'permission-denied'
       ? '<p class="muted">Firestore відхилив запит. Перевірте uid у <code>config.js</code> та в правилах Firestore.</p>'
       : `<p class="muted">${esc(err.message)}</p>`, true);
-  });
+  }, { publicOnly: !isOwner });
 }
 
 function showLogin() {
@@ -591,7 +597,7 @@ function listView(arg) {
     ].filter(Boolean).join(' · ');
     return `<a class="card" href="#/anime/${esc(a.id)}">
       <div class="card-poster">${posterImg(a.poster)}${hasNew(a) ? '<span class="dot-new">нові</span>' : ''}</div>
-      <div class="card-title">${esc(a.title)}</div>
+      <div class="card-title">${a.private ? '🔒 ' : ''}${esc(a.title)}</div>
       ${meta ? `<div class="card-meta">${meta}</div>` : ''}
     </a>`;
   }
@@ -912,6 +918,7 @@ function detail(id) {
         <h1>${esc(a0.title)}</h1>
         ${a0.originalTitle && a0.originalTitle !== a0.title ? `<div class="muted">${esc(a0.originalTitle)}</div>` : ''}
         <div class="badges"><span class="badge" id="d-badge">${STATUSES[status] || status}</span>
+          <span class="badge priv" id="d-priv"${a0.private ? '' : ' hidden'}>🔒 тільки для мене</span>
           <span class="badges-air" id="d-air"></span></div>
         <div id="d-watch"></div>
       </div>
@@ -935,6 +942,10 @@ function detail(id) {
 
     ${ro ? '' : `<section class="panel"><h2>Де дивлюсь</h2>
       <input class="input" type="url" id="d-url" placeholder="https://…" value="${esc(a0.watchUrl)}"></section>`}
+
+    ${ro ? '' : `<section class="panel"><h2>Видимість</h2>
+      <label class="check"><input type="checkbox" id="d-private"${a0.private ? ' checked' : ''}> 🔒 Тільки для мене</label>
+      <p class="hint">Прихований тайтл не видно в режимі перегляду: база не віддає його іншому акаунту.</p></section>`}
 
     <section class="panel"><h2>Опис</h2><p class="overview">${esc(a0.overview) || 'Опису немає.'}</p></section>
 
@@ -1208,6 +1219,13 @@ function detail(id) {
     setStatusUI(b.dataset.s);
   };
 
+  $('#d-private').onchange = (e) => {
+    const isPrivate = e.target.checked;
+    localPatch(id, { private: isPrivate });
+    $('#d-priv').hidden = !isPrivate;
+    toast(isPrivate ? 'Тайтл приховано: бачите лише ви' : 'Тайтл видно в режимі перегляду');
+  };
+
   $('#d-url').onchange = (e) => {
     const url = e.target.value.trim();
     if (url && !safeUrl(url)) return toast('Посилання має починатися з http:// або https://');
@@ -1241,6 +1259,7 @@ function addView() {
       <select class="input" id="a-status">${STATUS_KEYS.map((s) =>
         `<option value="${s}"${s === state.addStatus ? ' selected' : ''}>${STATUSES[s]}</option>`).join('')}</select>
     </label>
+    <label class="check"><input type="checkbox" id="a-private"${state.addPrivate ? ' checked' : ''}> 🔒 Тільки для мене</label>
     <div class="results" id="a-results"></div>`;
 
   const $q = $app.querySelector('#a-q');
@@ -1315,6 +1334,7 @@ function addView() {
   }
 
   $app.querySelector('#a-status').onchange = (e) => { state.addStatus = e.target.value; };
+  $app.querySelector('#a-private').onchange = (e) => { state.addPrivate = e.target.checked; };
 
   $res.onclick = async (e) => {
     const b = e.target.closest('[data-add]');
@@ -1322,7 +1342,7 @@ function addView() {
     b.disabled = true;
     b.textContent = 'Додаю…';
     const r = state.addResults.find((x) => String(x.id) === b.dataset.add);
-    const id = await addAnime(r, state.addStatus);
+    const id = await addAnime(r, state.addStatus, state.addPrivate);
     location.hash = `#/anime/${id}`;
   };
 
@@ -1330,7 +1350,7 @@ function addView() {
   return self;
 }
 
-async function addAnime(r, status) {
+async function addAnime(r, status, isPrivate = false) {
   const id = String(r.id);
   let tv = null;
   try { tv = await getTv(r.id); state.tv.set(r.id, tv); } catch (e) { console.warn(e); }
@@ -1350,6 +1370,7 @@ async function addAnime(r, status) {
     progress: { season: 1, episode: 0 },
     watchUrl: '',
     watchedExtras: [],
+    private: !!isPrivate,
     addedAt: now,
     updatedAt: now,
   };
@@ -1442,6 +1463,7 @@ function normalize(x) {
     progress: { season: int(x.progress?.season, 1), episode: int(x.progress?.episode, 0) },
     watchUrl: safeUrl(String(x.watchUrl || '')),
     watchedExtras: Array.isArray(x.watchedExtras) ? x.watchedExtras.map(posInt).filter(Boolean) : [],
+    private: x.private === true,
     addedAt: Number(x.addedAt) || Date.now(),
     updatedAt: Number(x.updatedAt) || Date.now(),
   };

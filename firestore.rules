@@ -11,7 +11,8 @@ service cloud.firestore {
     }
 
     match /anime/{animeId} {
-      allow read: if isOwner() || isReader();
+      // глядач бачить лише тайтли з private == false; позначені «тільки для мене» — лише власник
+      allow read: if isOwner() || (isReader() && resource.data.private == false);
       allow write: if isOwner();
     }
 
