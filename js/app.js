@@ -13,8 +13,11 @@ const STATUSES = {
   planned: 'Заплановано',
   completed: 'Переглянуто',
   dropped: 'Кинуто',
+  later: 'Пізніше',
 };
 const STATUS_KEYS = Object.keys(STATUSES);
+// «Пізніше» має окрему сторінку, тож у вкладках «Списків» його немає
+const LIST_KEYS = STATUS_KEYS.filter((s) => s !== 'later');
 const ACTIVE = ['watching', 'waiting'];
 const AL_STATUS = {
   FINISHED: 'завершено', RELEASING: 'виходить', NOT_YET_RELEASED: 'анонсовано', CANCELLED: 'скасовано', HIATUS: 'перерва',
@@ -475,8 +478,12 @@ function showNoAccess(user) {
 
 // ---------- роутинг
 
-const VIEWS = { '': home, list: listView, calendar: calendarView, recs: recsView, anime: detail, add: addView, more: moreView };
-const NAV_OF = { home: 'home', list: 'list', calendar: 'calendar', recs: 'recs', anime: 'list', add: 'add', more: 'more' };
+const VIEWS = {
+  '': home, list: listView, later: laterView, calendar: calendarView, recs: recsView, anime: detail, add: addView, more: moreView,
+};
+const NAV_OF = {
+  home: 'home', list: 'list', later: 'later', calendar: 'calendar', recs: 'recs', anime: 'list', add: 'add', more: 'more',
+};
 const scrollPos = {};
 
 function route() {
@@ -608,7 +615,7 @@ function home() {
 // ---------- списки
 
 function listView(arg) {
-  if (arg === 'all' || STATUSES[arg]) state.listStatus = arg;
+  if (arg === 'all' || LIST_KEYS.includes(arg)) state.listStatus = arg;
   const self = { name: 'list', update };
 
   $app.innerHTML = `
@@ -644,9 +651,10 @@ function listView(arg) {
 
   function update() {
     const q = state.listQuery.trim().toLowerCase();
-    const all = items().filter((a) => !q || `${a.title} ${a.originalTitle || ''}`.toLowerCase().includes(q));
+    const all = items().filter((a) => a.status !== 'later'
+      && (!q || `${a.title} ${a.originalTitle || ''}`.toLowerCase().includes(q)));
     const inTab = (s) => all.filter((a) => s === 'all' || a.status === s);
-    $tabs.innerHTML = ['all', ...STATUS_KEYS].map((s) => `<button class="tab${s === state.listStatus ? ' on' : ''}" data-tab="${s}">
+    $tabs.innerHTML = ['all', ...LIST_KEYS].map((s) => `<button class="tab${s === state.listStatus ? ' on' : ''}" data-tab="${s}">
       ${s === 'all' ? 'Усі' : STATUSES[s]} <span>${inTab(s).length}</span></button>`).join('');
     const shown = inTab(state.listStatus);
     ensureTvMeta(shown);
@@ -656,6 +664,62 @@ function listView(arg) {
   }
 
   update();
+  return self;
+}
+
+// ---------- «Переглянути пізніше»
+
+function laterView() {
+  const self = { name: 'later', update: render };
+
+  const row = (a) => {
+    const added = a.addedAt ? `додано ${fmtWhen(a.addedAt, true).replace(/\s*\(.*\)$/, '')}` : '';
+    const meta = [isMovie(a) ? 'фільм' : 'серіал', yearsOf(a), added].filter(Boolean).join(' · ');
+    return `<div class="row-item later-row">
+      <a class="later-link" href="#/anime/${esc(a.id)}">
+        ${posterImg(a.poster)}
+        <div class="grow"><div class="row-title">${a.private ? '🔒 ' : ''}${esc(a.title)}</div>
+          <div class="muted small">${esc(meta)}</div></div>
+      </a>
+      ${state.canEdit ? `<div class="fr-act">
+        <button class="btn sm primary" data-start="${esc(a.id)}">Почати</button>
+        <button class="btn sm" data-remove="${esc(a.id)}" aria-label="Прибрати зі списку">✕</button>
+      </div>` : ''}
+    </div>`;
+  };
+
+  function render() {
+    const list = items().filter((a) => a.status === 'later').sort((x, y) => (y.addedAt || 0) - (x.addedAt || 0));
+    ensureTvMeta(list);
+    $app.innerHTML = `<div class="cal-head"><h1 class="page-title">Переглянути пізніше</h1>
+        ${state.canEdit ? '<button class="btn primary sm" id="l-add">+ Додати</button>' : ''}</div>
+      ${list.length
+        ? `<div class="rows one">${list.map(row).join('')}</div>`
+        : `<p class="empty">Тут поки порожньо.${state.canEdit ? ' Додавайте тайтли кнопкою «+ Пізніше» в пошуку чи порадах.' : ''}</p>`}`;
+    if (!state.canEdit) return;
+
+    $app.querySelector('#l-add').onclick = () => {
+      state.addStatus = 'later';
+      location.hash = '#/add';
+    };
+    $app.querySelector('.rows')?.addEventListener('click', (e) => {
+      const start = e.target.closest('[data-start]')?.dataset.start;
+      const remove = e.target.closest('[data-remove]')?.dataset.remove;
+      const a = state.items.get(start || remove);
+      if (!a) return;
+      if (start) {
+        localPatch(a.id, { status: 'watching' });
+        toast(`«${a.title}» у «Дивлюсь»`);
+      } else {
+        if (!confirm(`Прибрати «${a.title}» зі списку?`)) return;
+        db.removeAnime(a.id).catch(fail);
+        state.items.delete(a.id);
+      }
+      render();
+    });
+  }
+
+  render();
   return self;
 }
 
@@ -887,7 +951,8 @@ function recsView() {
         ${genres.length ? `<div class="chips">${genres.map((g) => `<span class="chip">${g}</span>`).join('')}</div>` : ''}
         <p class="small muted because">Бо ви дивились: ${esc(because)}</p>
         <div class="row">
-          ${state.canEdit ? `<button class="btn primary sm" data-rec-add="${esc(r.title)}">Додати</button>` : ''}
+          ${state.canEdit ? `<button class="btn primary sm" data-rec-add="${esc(r.title)}">Додати</button>
+            <button class="btn sm" data-rec-later="${r.id}">+ Пізніше</button>` : ''}
           <a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">AniList</a>
         </div>
       </div>
@@ -911,7 +976,23 @@ function recsView() {
           ${list.length ? `<div class="results mt">${list.map(card).join('')}</div>` : '<p class="empty">Нічого нового: усе схоже вже у списку.</p>'}`}`;
 
     $app.querySelector('#r-refresh').onclick = () => { recs = null; render(); load(true); };
-    $app.querySelector('.results')?.addEventListener('click', (e) => {
+    $app.querySelector('.results')?.addEventListener('click', async (e) => {
+      const later = e.target.closest('[data-rec-later]');
+      if (later) {
+        const r = list.find((x) => String(x.id) === later.dataset.recLater);
+        later.disabled = true;
+        later.textContent = 'Додаю…';
+        try {
+          await addFromAnilist(r, 'later', false);
+          later.textContent = '✓ У «Пізніше»';
+          toast('Додано в «Переглянути пізніше»');
+        } catch (err) {
+          toast(err.message);
+          later.disabled = false;
+          later.textContent = '+ Пізніше';
+        }
+        return;
+      }
       const b = e.target.closest('[data-rec-add]');
       if (!b) return;
       // назву шукаємо на TMDB, щоб тайтл мав українську назву й опис
@@ -1412,7 +1493,8 @@ function addView() {
       <div class="result-title">${esc(m.title)}</div>
       <div class="muted small">${esc([FORMAT_UK[m.format] || m.format, m.year, m.episodes ? `${m.episodes} сер.` : ''].filter(Boolean).join(' · '))}</div>
       ${m.romaji && m.romaji !== m.title ? `<p class="small muted">${esc(m.romaji)}</p>` : ''}
-      <button class="btn primary sm" data-al-add="${m.id}">Додати</button>
+      <div class="row"><button class="btn primary sm" data-al-add="${m.id}">Додати</button>
+        <button class="btn sm" data-al-later="${m.id}">+ Пізніше</button></div>
     </div>
   </article>`;
 
@@ -1446,6 +1528,21 @@ function addView() {
 
   $alBox.onclick = async (e) => {
     if (e.target.closest('#a-al-search')) return searchAl(state.addQuery);
+    const later = e.target.closest('[data-al-later]');
+    if (later) {
+      later.disabled = true;
+      later.textContent = 'Додаю…';
+      try {
+        await addFromAnilist(state.alResults.find((x) => String(x.id) === later.dataset.alLater), 'later', state.addPrivate);
+        later.textContent = '✓ У «Пізніше»';
+        toast('Додано в «Переглянути пізніше»');
+      } catch (err) {
+        toast(err.message);
+        later.disabled = false;
+        later.textContent = '+ Пізніше';
+      }
+      return;
+    }
     const b = e.target.closest('[data-al-add]');
     if (!b) return;
     b.disabled = true;
@@ -1472,8 +1569,9 @@ function addView() {
         <div class="muted small">${esc(sub)}</div>
         <p class="clip small">${esc(r.overview)}</p>
         ${state.items.has(docId)
-          ? `<a class="btn sm" href="#/anime/${esc(docId)}">Вже у списку →</a>`
-          : `<button class="btn primary sm" data-add="${esc(docId)}">Додати</button>`}
+          ? `<a class="btn sm" href="#/anime/${esc(docId)}">${state.items.get(docId).status === 'later' ? 'У «Пізніше» →' : 'Вже у списку →'}</a>`
+          : `<div class="row"><button class="btn primary sm" data-add="${esc(docId)}">Додати</button>
+              <button class="btn sm" data-later="${esc(docId)}">+ Пізніше</button></div>`}
       </div>
     </article>`;
   };
@@ -1572,6 +1670,16 @@ function addView() {
   $app.querySelector('#a-private').onchange = (e) => { state.addPrivate = e.target.checked; };
 
   $res.onclick = async (e) => {
+    const later = e.target.closest('[data-later]');
+    if (later) {
+      later.disabled = true;
+      later.textContent = 'Додаю…';
+      const r = state.addResults.find((x) => resultDocId(x) === later.dataset.later);
+      await addAnime(r, 'later', state.addPrivate, state.addSeason, parseSeasonQuery(state.addQuery).base);
+      toast('Додано в «Переглянути пізніше»');
+      if (view === self) show();
+      return;
+    }
     const b = e.target.closest('[data-add]');
     if (!b) return;
     b.disabled = true;
