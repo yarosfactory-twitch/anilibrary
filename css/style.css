@@ -279,6 +279,19 @@ i.season { background: #34d399; }
 .badge.air-soon { color: #fbbf24; border-color: rgba(251, 191, 36, .35); }
 .badge.air-dead { color: var(--danger); border-color: rgba(248, 113, 113, .35); }
 
+/* франшиза */
+.fr-list { display: grid; gap: 6px; }
+.fr-row { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 10px; border: 1px solid transparent; }
+.fr-row .poster { width: 36px; flex: none; border-radius: 6px; }
+.fr-row.main { background: var(--surface-2); }
+.fr-row.cur { border-color: var(--accent); }
+.fr-row.done .grow, .fr-row.done .poster { opacity: .5; }
+.fr-row .row-title { color: var(--text); font-size: 14px; }
+.fr-act { flex: none; display: flex; gap: 6px; align-items: center; }
+.fr-act .btn.sm { min-height: 32px; padding: 0 10px; font-size: 13px; }
+.btn.on { color: #34d399; border-color: rgba(52, 211, 153, .35); }
+.tag.cur { color: var(--accent-text); }
+
 /* поради */
 .because { margin-top: 2px; }
 .result .chips { margin: 2px 0; }

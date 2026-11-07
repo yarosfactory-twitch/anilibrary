@@ -2,6 +2,7 @@ import * as cfg from './config.js';
 import { searchTv, getTv, peekTv, clearTvCache, posterUrl, cmpEp, nextEp, countNew } from './tmdb.js';
 import {
   getAnilist, peekAnilist, searchAnilist, matchAnilist, clearAnilistCache, getAiring, getRecommendations,
+  getFranchise, peekFranchise,
 } from './anilist.js';
 
 const STATUSES = {
@@ -44,6 +45,7 @@ const state = {
   items: new Map(), // id документа → тайтл
   tv: new Map(), // tmdbId → дані TMDB
   al: new Map(), // anilistId → дані AniList
+  fr: new Map(), // anilistId → список записів франшизи
   listStatus: 'watching',
   listQuery: '',
   addQuery: '',
@@ -155,6 +157,7 @@ function scheduleFor(a, progress = a.progress) {
       lastAt: null,
       fresh: last ? Math.max(0, last.episode - progress.episode) : 0,
       next: al.next ? { season: s, episode: al.next.episode, at: al.next.at } : null,
+      sequel: nextSeasonOf(a),
     };
   }
   const tv = tvFor(a.tmdbId);
@@ -170,7 +173,84 @@ function scheduleFor(a, progress = a.progress) {
 }
 
 // наступний сезон з AniList, якщо поточний повністю вийшов і переглянутий
-const sequelOf = (sch) => (sch?.source === 'anilist' && sch.fresh === 0 && sch.al.status === 'FINISHED' ? sch.al.sequel : null);
+const sequelOf = (sch) => (sch?.source === 'anilist' && sch.fresh === 0 && sch.al.status === 'FINISHED' ? sch.sequel : null);
+
+// ---------- франшиза
+// Основна лінія сезонів іде по зв'язках PREQUEL / SEQUEL між серіалами (зокрема через фільм між сезонами).
+// Усе інше (OVA, фільми, спешали, побічні історії) — доповнення, їх можна позначати переглянутими.
+
+const SERIES_FORMATS = ['TV', 'TV_SHORT', 'ONA'];
+const FORMAT_UK = { TV: 'серіал', TV_SHORT: 'короткий серіал', ONA: 'ONA', OVA: 'OVA', MOVIE: 'фільм', SPECIAL: 'спешл' };
+const sortKey = (d) => (d?.year ? new Date(d.year, (d.month || 12) - 1, d.day || 28).getTime() : Infinity);
+
+function setFranchise(data) {
+  data.forEach((n) => state.fr.set(n.id, data));
+}
+
+function franchiseOf(a) {
+  if (!a.anilistId) return null;
+  const list = cached(state.fr, a.anilistId, peekFranchise);
+  const byId = new Map((list || []).map((n) => [n.id, n]));
+  const cur = byId.get(a.anilistId);
+  if (!cur) return null;
+  const seen = new Set([cur.id]);
+  // найближчий серіал у напрямку type; через проміжні фільми / OVA до 3 кроків
+  const step = (node, type) => {
+    let layer = [node];
+    for (let hop = 0; hop < 3 && layer.length; hop++) {
+      const nextLayer = [];
+      for (const x of layer) {
+        for (const r of x.rel) {
+          const y = r.type === type && byId.get(r.id);
+          if (!y || seen.has(y.id)) continue;
+          if (SERIES_FORMATS.includes(y.format)) { seen.add(y.id); return y; }
+          nextLayer.push(y);
+        }
+      }
+      layer = nextLayer;
+    }
+    return null;
+  };
+  const chain = [cur];
+  for (let n = cur; (n = step(n, 'PREQUEL'));) chain.unshift(n);
+  for (let n = cur; (n = step(n, 'SEQUEL'));) chain.push(n);
+  const all = [...byId.values()].sort((x, y) => sortKey(x.start) - sortKey(y.start));
+  return { chain, curIdx: chain.indexOf(cur), all, mainIds: new Set(chain.map((n) => n.id)) };
+}
+
+function nextSeasonOf(a) {
+  if (!a.anilistId) return null;
+  const f = franchiseOf(a);
+  return f?.chain[f.curIdx + 1] || alFor(a.anilistId)?.sequel || null;
+}
+
+// непереглянуті OVA / фільми / спешали, що вийшли поблизу вашого сезону (між попереднім і наступним сезоном)
+function pendingExtras(a) {
+  const f = franchiseOf(a);
+  if (!f) return [];
+  const watched = new Set(a.watchedExtras || []);
+  const prev = f.chain[f.curIdx - 1];
+  const next = f.chain[f.curIdx + 1];
+  const from = prev ? sortKey(prev.start) : -Infinity;
+  const to = next?.start?.year ? sortKey(next.start) : Infinity;
+  return f.all.filter((n) => !f.mainIds.has(n.id) && !watched.has(n.id) && FORMAT_UK[n.format]
+    && n.via !== 'SPIN_OFF' && n.via !== 'SUMMARY'
+    && (n.status === 'FINISHED' || n.status === 'RELEASING')
+    && sortKey(n.start) >= from && sortKey(n.start) < to);
+}
+
+// фоново підтягуємо франшизи для списку (по одній, щоб не впертися в ліміт AniList)
+let frRunning = false;
+async function ensureFranchises() {
+  if (frRunning) return;
+  frRunning = true;
+  const list = items().filter((a) => a.anilistId && ['watching', 'waiting', 'completed'].includes(a.status));
+  for (const a of list) {
+    try { setFranchise(await getFranchise(a.anilistId)); } catch (e) { console.warn('franchise:', e); break; }
+  }
+  frRunning = false;
+  view?.update?.();
+}
 const isOut = (seq) => seq && (seq.status === 'RELEASING' || seq.status === 'FINISHED');
 
 const hasNew = (a) => ACTIVE.includes(a.status) && scheduleFor(a)?.fresh > 0;
@@ -203,12 +283,12 @@ function stepEp(a, p) {
   return cmpEp(next, p) > 0 ? next : null;
 }
 
-const endMessage = (a) => (a.anilistId && alFor(a.anilistId)?.sequel
+const endMessage = (a) => (nextSeasonOf(a)
   ? 'Сезон переглянуто: можна перейти на наступний'
   : 'Це остання серія, що є');
 
 function startNextSeason(a, season = a.progress.season) {
-  const seq = alFor(a.anilistId)?.sequel;
+  const seq = nextSeasonOf(a);
   if (!seq) return;
   localPatch(a.id, { anilistId: seq.id, progress: { season: season + 1, episode: 0 }, status: 'watching' });
   toast(`Сезон ${season + 1}: прогрес з початку`);
@@ -286,6 +366,7 @@ function onUser(user) {
       $nav.hidden = false;
       route();
       ensureData(activeItems());
+      ensureFranchises();
     } else {
       view?.update?.();
     }
@@ -421,6 +502,17 @@ function home() {
     ensureData(missing);
     upcoming.sort((x, y) => (x.at ?? Infinity) - (y.at ?? Infinity));
 
+    // OVA / фільми / спешали поблизу вашого сезону, які ще не переглянуті
+    const extras = items()
+      .filter((a) => a.anilistId && ['watching', 'waiting', 'completed'].includes(a.status))
+      .flatMap((a) => pendingExtras(a).map((n) => ({ a, n })))
+      .slice(0, 12);
+    const extraRow = ({ a, n }) => `<a class="row-item" href="#/anime/${esc(a.id)}">
+      ${posterImg(n.cover)}
+      <div class="grow"><div class="row-title">${esc(n.title)}</div>
+        <div class="muted small">${esc([FORMAT_UK[n.format], n.year, n.episodes > 1 ? `${n.episodes} сер.` : ''].filter(Boolean).join(' · '))} · до «${esc(a.title)}»</div></div>
+    </a>`;
+
     const empty = state.items.size
       ? 'Нових серій немає: усе переглянуто.'
       : `Список порожній. ${state.canEdit ? '<a href="#/add">Додайте перше аніме</a>' : ''}`;
@@ -431,7 +523,10 @@ function home() {
       ${loadError ? `<p class="notice">${esc(loadError)}</p>` : ''}
       ${fresh.length ? `<div class="ep-list">${fresh.map(newCard).join('')}</div>` : `<p class="empty">${empty}</p>`}
       ${seasons.length ? `<h2 class="section-title">Вийшов новий сезон</h2><div class="ep-list">${seasons.map(seasonCard).join('')}</div>` : ''}
-      ${upcoming.length ? `<h2 class="section-title">Скоро вийде</h2><div class="rows">${upcoming.map(upRow).join('')}</div>` : ''}`;
+      ${upcoming.length ? `<h2 class="section-title">Скоро вийде</h2><div class="rows">${upcoming.map(upRow).join('')}</div>` : ''}
+      ${extras.length ? `<h2 class="section-title">Доповнення франшизи</h2>
+        <p class="muted small" style="margin:-6px 0 10px">OVA, фільми та спешали поряд із вашим сезоном. Позначити переглянутими можна на картці тайтлу.</p>
+        <div class="rows">${extras.map(extraRow).join('')}</div>` : ''}`;
   }
 
   render();
@@ -547,7 +642,7 @@ function calendarView() {
     for (const a of activeItems()) {
       if (a.anilistId) {
         byAl.set(a.anilistId, a);
-        const seq = alFor(a.anilistId)?.sequel;
+        const seq = nextSeasonOf(a);
         if (seq?.status === 'NOT_YET_RELEASED' && startMs(seq.start)) {
           add(startMs(seq.start), { a, label: `Старт сезону ${a.progress.season + 1}`, time: '', kind: 'season' });
         }
@@ -771,7 +866,7 @@ function detail(id) {
   const ro = !state.canEdit;
   let prog = { ...a0.progress };
   let status = a0.status;
-  let tvErr = '', alErr = '';
+  let tvErr = '', alErr = '', frErr = '';
 
   const stepper = (key, label) => `<div>
     <span class="stepper-label">${label}</span>
@@ -804,6 +899,8 @@ function detail(id) {
     </section>
 
     <section class="panel"><h2>AniList</h2><div id="d-al"></div></section>
+
+    <section class="panel" id="d-fr-panel" hidden><h2>Франшиза</h2><div id="d-fr"></div></section>
 
     ${ro ? '' : `<section class="panel"><h2>Статус</h2><div class="seg" id="d-status">${STATUS_KEYS.map((s) =>
       `<button class="tab${s === status ? ' on' : ''}" data-s="${s}">${STATUSES[s]}</button>`).join('')}</div></section>`}
@@ -882,6 +979,46 @@ function detail(id) {
     $('#d-sched').innerHTML = lines.filter(Boolean).map((l) => `<div>${l}</div>`).join('');
   }
 
+  function renderFr() {
+    if (view !== self) return;
+    const a = item();
+    $('#d-fr-panel').hidden = !a.anilistId;
+    if (!a.anilistId) return;
+    const f = franchiseOf(a);
+    if (!f) {
+      $('#d-fr').innerHTML = `<p class="small muted">${esc(frErr) || 'Завантаження…'}</p>`;
+      return;
+    }
+    if (f.all.length < 2) {
+      $('#d-fr').innerHTML = '<p class="small muted">Інших сезонів, OVA чи фільмів немає.</p>';
+      return;
+    }
+    const watched = new Set(a.watchedExtras || []);
+    $('#d-fr').innerHTML = `<div class="fr-list">${f.all.map((n) => {
+      const idx = f.chain.indexOf(n);
+      const isMain = idx >= 0;
+      const isCur = idx === f.curIdx;
+      const done = (isMain && idx < f.curIdx) || watched.has(n.id);
+      const meta = [
+        FORMAT_UK[n.format] || n.format, n.year, n.episodes ? `${n.episodes} сер.` : '',
+        n.via === 'SPIN_OFF' ? 'спін-оф' : n.via === 'SUMMARY' ? 'рекап' : '',
+        n.status !== 'FINISHED' ? AL_STATUS[n.status] : '',
+      ].filter(Boolean).join(' · ');
+      let action = '';
+      if (isCur) action = '<span class="tag cur">зараз</span>';
+      else if (isMain) action = ro ? (done ? '<span class="tag">переглянуто</span>' : '') : `<button class="btn sm" data-fr-pick="${n.id}">Обрати</button>`;
+      else if (ro) action = watched.has(n.id) ? '<span class="tag">✓ переглянуто</span>' : '';
+      else action = `<button class="btn sm${watched.has(n.id) ? ' on' : ''}" data-fr-watch="${n.id}">${watched.has(n.id) ? '✓ переглянуто' : 'не переглянуто'}</button>`;
+      return `<div class="fr-row${isMain ? ' main' : ''}${isCur ? ' cur' : ''}${done ? ' done' : ''}">
+        ${posterImg(n.cover)}
+        <div class="grow"><a class="row-title" href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a>
+          <div class="muted small">${esc(meta)}</div></div>
+        <div class="fr-act">${action}</div>
+      </div>`;
+    }).join('')}</div>
+    <p class="hint">Виділено основну лінію сезонів. «Обрати» робить сезон поточним.</p>`;
+  }
+
   function renderAl() {
     if (view !== self) return;
     const a = item();
@@ -893,7 +1030,7 @@ function detail(id) {
       return;
     }
     const al = alFor(a.anilistId);
-    const seq = al?.sequel;
+    const seq = nextSeasonOf(a);
     $el.innerHTML = `
       ${al ? `<p><a href="${esc(al.url)}" target="_blank" rel="noopener">${esc(al.title)}</a></p>
         <p class="small muted">${esc([al.format, al.year, al.episodes ? `${al.episodes} сер.` : '', AL_STATUS[al.status]].filter(Boolean).join(' · '))}</p>
@@ -948,8 +1085,11 @@ function detail(id) {
         renderAl(); renderSched(); fixProg();
       })
       .catch((e) => { alErr = e.message; renderAl(); renderSched(); });
+    getFranchise(a0.anilistId)
+      .then((data) => { setFranchise(data); renderFr(); renderAl(); })
+      .catch((e) => { frErr = `Не вдалося завантажити франшизу: ${e.message}`; renderFr(); });
   }
-  queueMicrotask(() => { renderSched(); renderAl(); });
+  queueMicrotask(() => { renderSched(); renderAl(); renderFr(); });
 
   if (ro) return self;
 
@@ -991,6 +1131,29 @@ function detail(id) {
     else if (act === 'next') { clearTimeout(saveTimer); saveTimer = null; startNextSeason(item(), prog.season); rerender(); }
     else if (choose) { flushProg(); localPatch(id, { anilistId: Number(choose) }); rerender(); toast('AniList прив\'язано'); }
   };
+  $('#d-fr').onclick = (e) => {
+    const pick = e.target.closest('[data-fr-pick]')?.dataset.frPick;
+    const watch = e.target.closest('[data-fr-watch]')?.dataset.frWatch;
+    const f = franchiseOf(item());
+    if (!f) return;
+    if (pick) {
+      const idx = f.chain.findIndex((n) => n.id === Number(pick));
+      const n = f.chain[idx];
+      if (!n || !confirm(`Зробити поточним «${n.title}»? Це буде сезон ${idx + 1}, серії почнуться з 0.`)) return;
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      localPatch(id, { anilistId: n.id, progress: { season: idx + 1, episode: 0 } });
+      rerender();
+      toast(`Поточний сезон: ${n.title}`);
+    } else if (watch) {
+      const set = new Set(item().watchedExtras || []);
+      const wid = Number(watch);
+      if (set.has(wid)) set.delete(wid); else set.add(wid);
+      localPatch(id, { watchedExtras: [...set] });
+      renderFr();
+    }
+  };
+
   $('#d-al').onsubmit = (e) => {
     e.preventDefault();
     const q = e.target.elements.q.value.trim();
@@ -1147,6 +1310,7 @@ async function addAnime(r, status) {
     status,
     progress: { season: 1, episode: 0 },
     watchUrl: '',
+    watchedExtras: [],
     addedAt: now,
     updatedAt: now,
   };
@@ -1238,6 +1402,7 @@ function normalize(x) {
     status: STATUSES[x.status] ? x.status : 'planned',
     progress: { season: int(x.progress?.season, 1), episode: int(x.progress?.episode, 0) },
     watchUrl: safeUrl(String(x.watchUrl || '')),
+    watchedExtras: Array.isArray(x.watchedExtras) ? x.watchedExtras.map(posInt).filter(Boolean) : [],
     addedAt: Number(x.addedAt) || Date.now(),
     updatedAt: Number(x.updatedAt) || Date.now(),
   };

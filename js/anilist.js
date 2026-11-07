@@ -5,12 +5,20 @@ const API = 'https://graphql.anilist.co';
 const PREFIX = 'anilist:';
 const SERIES = ['TV', 'TV_SHORT', 'ONA']; // формати, які вважаємо «сезонами»
 
-async function gql(query, variables) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function gql(query, variables, retries = 2) {
   const res = await fetch(API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ query, variables }),
   });
+  // ліміт запитів AniList: чекаємо, скільки просять (не довше 30 с), і пробуємо ще раз
+  if (res.status === 429 && retries > 0) {
+    const wait = Math.min(Number(res.headers.get('Retry-After')) || 10, 30);
+    await sleep(wait * 1000);
+    return gql(query, variables, retries - 1);
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json.errors) throw new Error(`AniList: ${json.errors?.[0]?.message || `помилка ${res.status}`}`);
   return json.data;
@@ -137,6 +145,78 @@ export async function getRecommendations(ids, { force = false } = {}) {
     }
   }
   return out;
+}
+
+// ---------- франшиза: усі пов'язані записи (сезони, OVA, фільми, спешали)
+
+const EXPAND = ['PREQUEL', 'SEQUEL', 'SIDE_STORY', 'PARENT']; // ідемо по цих зв'язках далі
+const LEAF = ['SPIN_OFF', 'SUMMARY']; // показуємо, але їхні зв'язки не розгортаємо (інакше затягне чужі франшизи)
+
+const FR_QUERY = `query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids, type: ANIME) {
+  id siteUrl format status episodes seasonYear isAdult
+  title { romaji english } coverImage { medium } startDate { year month day }
+  relations { edges { relationType node { id type format isAdult } } }
+} } }`;
+
+// дані франшизи зберігаються один раз (fr:<корінь>), а для кожного учасника — вказівник (frp:<id>)
+function readFranchise(id) {
+  const root = readCache(`frp:${id}`);
+  return root ? readCache(`fr:${root}`) : null;
+}
+
+export const peekFranchise = (id) => readFranchise(id)?.data ?? null;
+
+const frPending = new Map(); // id → проміс, щоб не вантажити ту саму франшизу двічі паралельно
+
+export function getFranchise(id, { force = false } = {}) {
+  const c = readFranchise(id);
+  if (!force && c && Date.now() - c.t < CACHE_HOURS * 12 * 3600e3) return Promise.resolve(c.data);
+  if (!frPending.has(id)) frPending.set(id, loadFranchise(id).finally(() => frPending.delete(id)));
+  return frPending.get(id);
+}
+
+async function loadFranchise(id) {
+  const nodes = new Map();
+  const via = new Map([[id, null]]); // яким зв'язком знайшли запис
+  let frontier = [id];
+  for (let depth = 0; frontier.length && depth < 10 && nodes.size < 80; depth++) {
+    const d = await gql(FR_QUERY, { ids: frontier.slice(0, 50) });
+    const next = [];
+    for (const m of d.Page.media) {
+      if (m.isAdult || m.format === 'MUSIC') continue;
+      const rel = m.relations.edges
+        .filter((e) => [...EXPAND, ...LEAF].includes(e.relationType)
+          && e.node.type === 'ANIME' && e.node.format !== 'MUSIC' && !e.node.isAdult)
+        .map((e) => ({ type: e.relationType, id: e.node.id }));
+      const v = via.get(m.id) ?? null;
+      nodes.set(m.id, {
+        id: m.id,
+        url: m.siteUrl,
+        title: m.title.english || m.title.romaji,
+        format: m.format,
+        status: m.status,
+        episodes: m.episodes,
+        year: m.seasonYear || m.startDate?.year || null,
+        start: m.startDate,
+        cover: m.coverImage?.medium || '',
+        via: v,
+        rel,
+      });
+      if (LEAF.includes(v)) continue;
+      for (const r of rel) {
+        if (via.has(r.id)) continue;
+        via.set(r.id, r.type);
+        next.push(r.id);
+      }
+    }
+    frontier = next;
+  }
+  const data = [...nodes.values()];
+  if (!data.length) return data;
+  const root = Math.min(...nodes.keys());
+  writeCache(`fr:${root}`, { t: Date.now(), data });
+  for (const k of nodes.keys()) writeCache(`frp:${k}`, root);
+  return data;
 }
 
 export async function searchAnilist(q) {
