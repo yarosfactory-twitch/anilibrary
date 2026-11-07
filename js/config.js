@@ -11,7 +11,7 @@ export const firebaseConfig = {
 };
 
 // uid власника: може читати й редагувати.
-export const OWNER_UID = '';
+export const OWNER_UID = 'QekhrmGM5IcM5dSGFS4bPPQgZiy1';
 
 // uid другої людини: тільки читання.
 export const READER_UID = '';

@@ -4,7 +4,7 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function isOwner() {
-      return request.auth != null && request.auth.uid == 'OWNER_UID_ТУТ';
+      return request.auth != null && request.auth.uid == 'QekhrmGM5IcM5dSGFS4bPPQgZiy1';
     }
     function isReader() {
       return request.auth != null && request.auth.uid == 'READER_UID_ТУТ';
