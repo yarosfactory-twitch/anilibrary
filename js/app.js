@@ -283,6 +283,33 @@ function stepEp(a, p) {
   return cmpEp(next, p) > 0 ? next : null;
 }
 
+// Статус після перегляду останньої серії: «Переглянуто», якщо продовження немає,
+// або «Чекаю сезон», якщо його анонсовано / серіал продовжується. null — статус не міняємо.
+function autoStatus(a, p) {
+  if (!['watching', 'planned', 'waiting'].includes(a.status)) return null;
+  let more;
+  if (a.anilistId) {
+    const al = alFor(a.anilistId);
+    if (!al || al.status !== 'FINISHED' || !al.episodes || p.episode < al.episodes) return null;
+    const seq = nextSeasonOf(a);
+    if (isOut(seq)) return null; // наступний сезон уже виходить — дивимось далі
+    const tvStatus = tvFor(a.tmdbId)?.status;
+    more = !!seq || tvStatus === 'Returning Series' || tvStatus === 'In Production';
+  } else {
+    const tv = tvFor(a.tmdbId);
+    if (!tv?.seasons?.length || tv.next) return null;
+    const last = tv.seasons.reduce((x, y) => (y.season > x.season ? y : x));
+    if (p.season < last.season || p.episode < last.episodes) return null;
+    more = tv.status === 'Returning Series' || tv.status === 'In Production';
+  }
+  const status = more ? 'waiting' : 'completed';
+  return status === a.status ? null : status;
+}
+
+const autoStatusMessage = (s) => (s === 'completed'
+  ? 'Останню серію переглянуто: тайтл у «Переглянуто»'
+  : 'Сезон переглянуто: тайтл у «Чекаю сезон»');
+
 const endMessage = (a) => (nextSeasonOf(a)
   ? 'Сезон переглянуто: можна перейти на наступний'
   : 'Це остання серія, що є');
@@ -439,8 +466,9 @@ document.addEventListener('click', (e) => {
   if (btn.dataset.act === 'plus1') {
     const progress = stepEp(a, a.progress);
     if (!progress) return toast(endMessage(a));
-    localPatch(a.id, { progress });
-    toast(`Переглянуто ${fmtEp(progress)}`);
+    const status = autoStatus(a, progress);
+    localPatch(a.id, status ? { progress, status } : { progress });
+    toast(status ? autoStatusMessage(status) : `Переглянуто ${fmtEp(progress)}`);
   } else if (btn.dataset.act === 'next-season') {
     startNextSeason(a);
   }
@@ -1095,6 +1123,13 @@ function detail(id) {
 
   // прогрес: оновлюємо поля одразу, а в Firestore пишемо з невеликою затримкою
   let saveTimer = null;
+  function setStatusUI(s) {
+    status = s;
+    $app.querySelectorAll('#d-status .tab').forEach((x) => x.classList.toggle('on', x.dataset.s === s));
+    $('#d-badge').textContent = STATUSES[s];
+  }
+
+  // повертає новий статус, якщо він змінився автоматично (остання серія)
   function setProg(p) {
     prog = clampProg(item(), p);
     $('#p-season').value = prog.season;
@@ -1102,7 +1137,14 @@ function detail(id) {
     item().progress = prog;
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => { saveTimer = null; patch(id, { progress: prog }); }, 500);
+    const auto = autoStatus(item(), prog);
+    if (auto) {
+      localPatch(id, { status: auto });
+      setStatusUI(auto);
+      toast(autoStatusMessage(auto));
+    }
     renderSched();
+    return auto;
   }
   function flushProg() {
     if (!saveTimer) return;
@@ -1119,8 +1161,7 @@ function detail(id) {
   $('#d-plus1').onclick = () => {
     const next = stepEp(item(), prog);
     if (!next) return toast(endMessage(item()));
-    setProg(next);
-    toast(`Переглянуто ${fmtEp(prog)}`);
+    if (!setProg(next)) toast(`Переглянуто ${fmtEp(prog)}`);
   };
 
   $('#d-al').onclick = (e) => {
@@ -1163,10 +1204,8 @@ function detail(id) {
   $('#d-status').onclick = (e) => {
     const b = e.target.closest('[data-s]');
     if (!b || b.dataset.s === status) return;
-    status = b.dataset.s;
-    localPatch(id, { status });
-    $app.querySelectorAll('#d-status .tab').forEach((x) => x.classList.toggle('on', x === b));
-    $('#d-badge').textContent = STATUSES[status];
+    localPatch(id, { status: b.dataset.s });
+    setStatusUI(b.dataset.s);
   };
 
   $('#d-url').onchange = (e) => {
