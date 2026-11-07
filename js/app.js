@@ -1,6 +1,8 @@
 import * as cfg from './config.js';
 import { searchTv, getTv, peekTv, clearTvCache, posterUrl, cmpEp, nextEp, countNew } from './tmdb.js';
-import { getAnilist, peekAnilist, searchAnilist, matchAnilist, clearAnilistCache, getAiring } from './anilist.js';
+import {
+  getAnilist, peekAnilist, searchAnilist, matchAnilist, clearAnilistCache, getAiring, getRecommendations,
+} from './anilist.js';
 
 const STATUSES = {
   watching: 'Дивлюсь',
@@ -13,6 +15,21 @@ const STATUS_KEYS = Object.keys(STATUSES);
 const ACTIVE = ['watching', 'waiting'];
 const AL_STATUS = {
   FINISHED: 'завершено', RELEASING: 'виходить', NOT_YET_RELEASED: 'анонсовано', CANCELLED: 'скасовано', HIATUS: 'перерва',
+};
+// статус поточного сезону (AniList) і серіалу загалом (TMDB) для значків на картці
+const AL_SEASON = {
+  RELEASING: ['сезон виходить', 'live'], FINISHED: ['сезон завершено', 'done'], NOT_YET_RELEASED: ['сезон анонсовано', 'soon'],
+  HIATUS: ['сезон на паузі', 'soon'], CANCELLED: ['сезон скасовано', 'dead'],
+};
+const TV_STATUS = {
+  'Returning Series': ['серіал продовжується', 'live'], Ended: ['серіал завершено', 'done'], Canceled: ['серіал скасовано', 'dead'],
+  'In Production': ['у виробництві', 'soon'], Planned: ['заплановано', 'soon'], Pilot: ['пілот', 'soon'],
+};
+const GENRES_UK = {
+  Action: 'Бойовик', Adventure: 'Пригоди', Comedy: 'Комедія', Drama: 'Драма', Ecchi: 'Еччі', Fantasy: 'Фентезі',
+  Horror: 'Жахи', 'Mahou Shoujo': 'Махо-сьодзьо', Mecha: 'Меха', Music: 'Музика', Mystery: 'Детектив',
+  Psychological: 'Психологічне', Romance: 'Романтика', 'Sci-Fi': 'Фантастика', 'Slice of Life': 'Повсякденність',
+  Sports: 'Спорт', Supernatural: 'Надприродне', Thriller: 'Трилер',
 };
 
 const $app = document.getElementById('app');
@@ -306,8 +323,8 @@ function showNoAccess(user) {
 
 // ---------- роутинг
 
-const VIEWS = { '': home, list: listView, calendar: calendarView, anime: detail, add: addView, more: moreView };
-const NAV_OF = { home: 'home', list: 'list', calendar: 'calendar', anime: 'list', add: 'add', more: 'more' };
+const VIEWS = { '': home, list: listView, calendar: calendarView, recs: recsView, anime: detail, add: addView, more: moreView };
+const NAV_OF = { home: 'home', list: 'list', calendar: 'calendar', recs: 'recs', anime: 'list', add: 'add', more: 'more' };
 const scrollPos = {};
 
 function route() {
@@ -641,6 +658,109 @@ function calendarView() {
   return self;
 }
 
+// ---------- рекомендації
+
+function recsView() {
+  const self = { name: 'recs', update };
+  let recs = null; // Map anilistId → рекомендації; null — ще вантажиться
+  let error = '';
+  let loading = false;
+
+  // на що спираємось: переглянуте та те, що дивимось, з прив'язкою до AniList; низько оцінене (1–4) не враховуємо
+  const seeds = () => items().filter((a) => a.anilistId
+    && ['completed', 'watching', 'waiting'].includes(a.status) && !(a.rating && a.rating <= 4));
+
+  async function load(force = false) {
+    loading = true;
+    try {
+      const data = await getRecommendations(seeds().map((a) => a.anilistId), { force });
+      recs = force || !recs ? data : new Map([...recs, ...data]);
+      error = '';
+    } catch (e) {
+      error = e.message;
+      recs ||= new Map();
+    }
+    loading = false;
+    if (view === self) render();
+  }
+
+  function update() {
+    if (!loading && recs && seeds().some((a) => !recs.has(a.anilistId))) load();
+    else render();
+  }
+
+  function compute() {
+    const ownIds = new Set(items().map((a) => a.anilistId).filter(Boolean));
+    const ownTitles = new Set(items().flatMap((a) => [a.title, a.originalTitle]).filter(Boolean).map((s) => s.toLowerCase()));
+    const agg = new Map();
+    for (const a of seeds()) {
+      const weight = a.rating ? a.rating / 5 : 1; // 10 → ×2, без оцінки → ×1
+      for (const r of recs.get(a.anilistId) || []) {
+        if (ownIds.has(r.id) || ownTitles.has(r.title.toLowerCase()) || ownTitles.has((r.romaji || '').toLowerCase())) continue;
+        const e = agg.get(r.id) || { ...r, points: 0, because: [] };
+        e.points += weight * Math.log2(2 + r.votes);
+        if (!e.because.includes(a.title)) e.because.push(a.title);
+        agg.set(r.id, e);
+      }
+    }
+    return [...agg.values()].sort((x, y) => y.points - x.points).slice(0, 40);
+  }
+
+  const card = (r) => {
+    const meta = [r.format, r.year, r.episodes ? `${r.episodes} сер.` : '', r.score ? `${r.score}%` : '',
+      r.status === 'RELEASING' ? 'виходить' : r.status === 'NOT_YET_RELEASED' ? 'анонс' : ''].filter(Boolean).join(' · ');
+    const because = r.because.slice(0, 2).join(', ') + (r.because.length > 2 ? ` і ще ${r.because.length - 2}` : '');
+    const genres = r.genres.map((g) => GENRES_UK[g]).filter(Boolean).slice(0, 3);
+    return `<article class="result">
+      ${posterImg(r.cover)}
+      <div class="result-body">
+        <div class="result-title">${esc(r.title)}</div>
+        <div class="muted small">${esc(meta)}</div>
+        ${genres.length ? `<div class="chips">${genres.map((g) => `<span class="chip">${g}</span>`).join('')}</div>` : ''}
+        <p class="small muted because">Бо ви дивились: ${esc(because)}</p>
+        <div class="row">
+          ${state.canEdit ? `<button class="btn primary sm" data-rec-add="${esc(r.title)}">Додати</button>` : ''}
+          <a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">AniList</a>
+        </div>
+      </div>
+    </article>`;
+  };
+
+  function render() {
+    const head = `<div class="cal-head"><h1 class="page-title">Що подивитись</h1>
+      ${recs ? '<button class="btn sm" id="r-refresh">Оновити</button>' : ''}</div>`;
+    if (!recs) {
+      $app.innerHTML = `${head}<div class="loader"></div>`;
+      return;
+    }
+    const list = compute();
+    const n = seeds().length;
+    $app.innerHTML = `${head}
+      ${error ? `<p class="notice">${esc(error)}</p>` : ''}
+      ${!n ? `<p class="empty">Порад поки немає. Позначте тайтли як «Переглянуто» або «Дивлюсь»
+          (з прив'язкою до AniList), і тут з'являться схожі.</p>`
+        : `<p class="muted small">На основі ${n} ${plural(n, 'тайтлу', 'тайтлів', 'тайтлів')} з вашого списку й оцінок глядачів AniList.
+            Ваша висока оцінка тайтлу підсилює схожі на нього.</p>
+          ${list.length ? `<div class="results mt">${list.map(card).join('')}</div>` : '<p class="empty">Нічого нового: усе схоже вже у списку.</p>'}`}`;
+
+    $app.querySelector('#r-refresh').onclick = () => { recs = null; render(); load(true); };
+    $app.querySelector('.results')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-rec-add]');
+      if (!b) return;
+      // назву шукаємо на TMDB, щоб тайтл мав українську назву й опис
+      state.addQuery = b.dataset.recAdd;
+      state.addResults = null;
+      state.addAutoSearch = true;
+      state.addStatus = 'planned';
+      location.hash = '#/add';
+    });
+  }
+
+  render();
+  load();
+  return self;
+}
+
 // ---------- картка тайтлу
 
 function detail(id) {
@@ -675,7 +795,7 @@ function detail(id) {
         <h1>${esc(a0.title)}</h1>
         ${a0.originalTitle && a0.originalTitle !== a0.title ? `<div class="muted">${esc(a0.originalTitle)}</div>` : ''}
         <div class="badges"><span class="badge" id="d-badge">${STATUSES[status] || status}</span>
-          ${ro && rating ? `<span class="badge">★ ${rating}</span>` : ''}</div>
+          ${ro && rating ? `<span class="badge">★ ${rating}</span>` : ''}<span class="badges-air" id="d-air"></span></div>
         <div id="d-watch"></div>
       </div>
     </div>
@@ -738,10 +858,19 @@ function detail(id) {
     }
   }
 
+  function renderAir() {
+    const a = item();
+    const al = a.anilistId && alFor(a.anilistId);
+    const tv = tvFor(a.tmdbId);
+    $('#d-air').innerHTML = [al && AL_SEASON[al.status], tv && TV_STATUS[tv.status]]
+      .filter(Boolean).map(([text, cls]) => `<span class="badge air-${cls}">${text}</span>`).join('');
+  }
+
   function renderSched() {
     if (view !== self) return;
     const a = item();
     renderSteppers();
+    renderAir();
     const sch = scheduleFor(a, prog);
     if ($('#d-hint')) {
       $('#d-hint').textContent = a.anilistId
@@ -999,6 +1128,12 @@ function addView() {
     $q.blur(); // ховаємо клавіатуру на телефоні
     search(q);
   };
+
+  // перехід зі сторінки порад: одразу шукаємо назву
+  if (state.addAutoSearch && state.addQuery) {
+    state.addAutoSearch = false;
+    search(state.addQuery);
+  }
 
   $app.querySelector('#a-status').onchange = (e) => { state.addStatus = e.target.value; };
 

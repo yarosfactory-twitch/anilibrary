@@ -101,6 +101,44 @@ export async function getAiring(ids, from, to, { force = false } = {}) {
   return out;
 }
 
+// Рекомендації глядачів AniList для кількох записів. Повертає Map id запису → [рекомендації].
+export async function getRecommendations(ids, { force = false } = {}) {
+  const out = new Map();
+  const todo = [];
+  for (const id of new Set(ids)) {
+    const c = readCache(`rec:${id}`);
+    if (!force && c && Date.now() - c.t < CACHE_HOURS * 4 * 3600e3) out.set(id, c.data);
+    else todo.push(id);
+  }
+  for (let i = 0; i < todo.length; i += 20) {
+    const d = await gql(`query ($ids: [Int]) { Page(perPage: 20) { media(id_in: $ids, type: ANIME) { id
+      recommendations(sort: RATING_DESC, perPage: 10) { nodes { rating mediaRecommendation {
+        id siteUrl format seasonYear episodes status averageScore isAdult genres title { romaji english } coverImage { large }
+      } } } } } }`, { ids: todo.slice(i, i + 20) });
+    for (const m of d.Page.media) {
+      const recs = m.recommendations.nodes
+        .filter((n) => n.mediaRecommendation && !n.mediaRecommendation.isAdult && n.rating > 0)
+        .map(({ rating, mediaRecommendation: r }) => ({
+          id: r.id,
+          votes: rating,
+          url: r.siteUrl,
+          title: r.title.english || r.title.romaji,
+          romaji: r.title.romaji,
+          cover: r.coverImage?.large || '',
+          format: r.format,
+          year: r.seasonYear,
+          episodes: r.episodes,
+          status: r.status,
+          score: r.averageScore,
+          genres: r.genres || [],
+        }));
+      out.set(m.id, recs);
+      writeCache(`rec:${m.id}`, { t: Date.now(), data: recs });
+    }
+  }
+  return out;
+}
+
 export async function searchAnilist(q) {
   const data = await gql(`query ($q: String) { Page(perPage: 12) { media(search: $q, type: ANIME, sort: SEARCH_MATCH) { ${SHORT} } } }`, { q });
   return data.Page.media.map((m) => ({
