@@ -7,7 +7,7 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == 'QekhrmGM5IcM5dSGFS4bPPQgZiy1';
     }
     function isReader() {
-      return request.auth != null && request.auth.uid == 'READER_UID_ТУТ';
+      return request.auth != null && request.auth.uid == 'zxtOV2c6elPZ5Okd4sRcA3lIKxU2';
     }
 
     match /anime/{animeId} {

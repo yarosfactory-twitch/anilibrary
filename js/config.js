@@ -14,7 +14,7 @@ export const firebaseConfig = {
 export const OWNER_UID = 'QekhrmGM5IcM5dSGFS4bPPQgZiy1';
 
 // uid другої людини: тільки читання.
-export const READER_UID = '';
+export const READER_UID = 'zxtOV2c6elPZ5Okd4sRcA3lIKxU2';
 
 // Ключ TMDB API v3 (https://www.themoviedb.org/settings/api)
 export const TMDB_API_KEY = '7c2b3da6976f16ca5acc1b80122966bd';
