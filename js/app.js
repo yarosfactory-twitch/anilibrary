@@ -256,6 +256,24 @@ const isOut = (seq) => seq && (seq.status === 'RELEASING' || seq.status === 'FIN
 
 const hasNew = (a) => ACTIVE.includes(a.status) && scheduleFor(a)?.fresh > 0;
 
+// роки виходу серіалу з TMDB: «2005–2008», «2012–…» (ще виходить) або «2019»
+function yearsOf(a) {
+  const tv = tvFor(a.tmdbId);
+  if (!tv?.firstYear) return '';
+  if (tv.status === 'Returning Series' || tv.status === 'In Production') return `${tv.firstYear}–…`;
+  return tv.lastYear && tv.lastYear !== tv.firstYear ? `${tv.firstYear}–${tv.lastYear}` : String(tv.firstYear);
+}
+
+// фоново підтягуємо дані TMDB (роки) для тайтлів, яких ще немає в кеші
+const metaTried = new Set();
+function ensureTvMeta(list) {
+  const ids = list.map((a) => a.tmdbId).filter((id) => !metaTried.has(id) && !tvFor(id)?.firstYear);
+  if (!ids.length) return;
+  ids.forEach((id) => metaTried.add(id));
+  Promise.allSettled(ids.map((id) => getTv(id).then((tv) => state.tv.set(id, tv))))
+    .then(() => view?.update?.());
+}
+
 // Межі прогресу за відомими даними: не можна переглянути більше серій, ніж є в сезоні.
 // null — межа невідома (немає даних або AniList ще не знає кількості серій).
 function limits(a, season) {
@@ -592,6 +610,7 @@ function listView(arg) {
 
   function card(a) {
     const meta = [
+      yearsOf(a),
       state.listStatus === 'all' ? STATUSES[a.status] : '',
       a.progress.episode > 0 ? fmtEp(a.progress) : '',
     ].filter(Boolean).join(' · ');
@@ -609,6 +628,7 @@ function listView(arg) {
     $tabs.innerHTML = ['all', ...STATUS_KEYS].map((s) => `<button class="tab${s === state.listStatus ? ' on' : ''}" data-tab="${s}">
       ${s === 'all' ? 'Усі' : STATUSES[s]} <span>${inTab(s).length}</span></button>`).join('');
     const shown = inTab(state.listStatus);
+    ensureTvMeta(shown);
     $grid.innerHTML = shown.length
       ? shown.map(card).join('')
       : `<p class="empty">${q ? 'Нічого не знайдено.' : 'Тут поки порожньо.'}</p>`;
@@ -901,6 +921,8 @@ function detail(id) {
   let prog = { ...a0.progress };
   let status = a0.status;
   let tvErr = '', alErr = '', frErr = '';
+  const hasOrig = !!a0.originalTitle && a0.originalTitle !== a0.title;
+  const yearsLabel = () => { const y = yearsOf(item()); return y ? (hasOrig ? ` · ${y}` : y) : ''; };
 
   const stepper = (key, label) => `<div>
     <span class="stepper-label">${label}</span>
@@ -916,7 +938,7 @@ function detail(id) {
       ${posterImg(a0.poster)}
       <div class="detail-info">
         <h1>${esc(a0.title)}</h1>
-        ${a0.originalTitle && a0.originalTitle !== a0.title ? `<div class="muted">${esc(a0.originalTitle)}</div>` : ''}
+        <div class="muted">${hasOrig ? esc(a0.originalTitle) : ''}<span id="d-years">${yearsLabel()}</span></div>
         <div class="badges"><span class="badge" id="d-badge">${STATUSES[status] || status}</span>
           <span class="badge priv" id="d-priv"${a0.private ? '' : ' hidden'}>🔒 тільки для мене</span>
           <span class="badges-air" id="d-air"></span></div>
@@ -986,6 +1008,7 @@ function detail(id) {
     const a = item();
     const al = a.anilistId && alFor(a.anilistId);
     const tv = tvFor(a.tmdbId);
+    $('#d-years').textContent = yearsLabel();
     $('#d-air').innerHTML = [al && AL_SEASON[al.status], tv && TV_STATUS[tv.status]]
       .filter(Boolean).map(([text, cls]) => `<span class="badge air-${cls}">${text}</span>`).join('');
   }

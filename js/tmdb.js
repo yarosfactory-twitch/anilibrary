@@ -32,7 +32,8 @@ export async function getTv(id, { force = false } = {}) {
   if (!force) {
     try {
       const c = JSON.parse(localStorage.getItem(PREFIX + id));
-      if (c && Date.now() - c.t < CACHE_HOURS * 3600e3) return c.data;
+      // 'firstYear' in ... — кеш зі старої версії без років вважаємо застарілим
+      if (c && Date.now() - c.t < CACHE_HOURS * 3600e3 && 'firstYear' in c.data) return c.data;
     } catch { /* немає кешу */ }
   }
   const d = await get(`/tv/${id}`, { language: 'uk-UA' });
@@ -52,6 +53,8 @@ export async function getTv(id, { force = false } = {}) {
     overview: overview || '',
     poster: d.poster_path || null,
     status: d.status,
+    firstYear: Number((d.first_air_date || '').slice(0, 4)) || null,
+    lastYear: Number((d.last_air_date || '').slice(0, 4)) || null,
     last: ep(d.last_episode_to_air),
     next: ep(d.next_episode_to_air),
     seasons: (d.seasons || [])
