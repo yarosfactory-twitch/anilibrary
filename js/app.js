@@ -1421,8 +1421,11 @@ function addView() {
   };
 
   const show = () => {
-    if (state.addResults === null) $res.innerHTML = '';
-    else $res.innerHTML = state.addResults.length ? state.addResults.map(resultCard).join('') : '<p class="empty">Нічого не знайдено.</p>';
+    if (state.addResults === null) { $res.innerHTML = ''; return; }
+    const hint = state.addHint ? `<p class="muted small search-hint">${esc(state.addHint)}</p>` : '';
+    $res.innerHTML = hint + (state.addResults.length
+      ? state.addResults.map(resultCard).join('')
+      : `<p class="empty">Нічого не знайдено ні на TMDB, ні через AniList. Спробуйте англійську чи японську назву.</p>`);
   };
 
   let searchSeq = 0;
@@ -1432,8 +1435,28 @@ function addView() {
     state.addQuery = q;
     if (!state.addResults?.length) $res.innerHTML = '<div class="loader"></div>';
     try {
-      const results = await searchMulti(q);
+      const { base, season } = parseSeasonQuery(q);
+      let results = await searchMulti(base);
+      let hint = '';
+      // TMDB нічого не знайшов: беремо назви з AniList (англ., ромадзі, японська) і шукаємо ними
+      if (!results.length) {
+        const al = await searchAnilist(base).catch(() => []);
+        const names = [...new Set(al.slice(0, 3).flatMap((m) => [m.title, m.romaji, m.native]))]
+          .filter((n) => n && n.toLowerCase() !== base.toLowerCase()).slice(0, 5);
+        for (const name of names) {
+          if (seq !== searchSeq) return;
+          const { base: alBase } = parseSeasonQuery(name);
+          results = await searchMulti(alBase).catch(() => []);
+          if (results.length) { hint = `Знайдено через AniList за назвою «${alBase}».`; break; }
+        }
+      }
       if (seq !== searchSeq || view !== self) return; // прийшла відповідь на старіший запит
+      state.addSeason = season;
+      state.addHint = [
+        base !== q ? `Шукаю «${base}»: сезони на TMDB лежать усередині одного серіалу.` : '',
+        hint,
+        season ? `Сезон ${season} виставиться автоматично після додавання серіалу.` : '',
+      ].filter(Boolean).join(' ');
       // аніме (жанр «Анімація») — нагору
       results.sort((x, y) => (y.genre_ids?.includes(16) ? 1 : 0) - (x.genre_ids?.includes(16) ? 1 : 0));
       state.addResults = results;
@@ -1451,6 +1474,8 @@ function addView() {
       searchSeq++;
       state.addQuery = q;
       state.addResults = null;
+      state.addSeason = null;
+      state.addHint = '';
       show();
       return;
     }
@@ -1481,7 +1506,7 @@ function addView() {
     b.disabled = true;
     b.textContent = 'Додаю…';
     const r = state.addResults.find((x) => resultDocId(x) === b.dataset.add);
-    const id = await addAnime(r, state.addStatus, state.addPrivate);
+    const id = await addAnime(r, state.addStatus, state.addPrivate, state.addSeason, parseSeasonQuery(state.addQuery).base);
     location.hash = `#/anime/${id}`;
   };
 
@@ -1491,14 +1516,47 @@ function addView() {
 
 const resultDocId = (r) => (r.mediaType === 'movie' ? `movie-${r.id}` : String(r.id));
 
-async function addAnime(r, status, isPrivate = false) {
-  if (r.mediaType === 'movie') return addMovie(r, status, isPrivate);
+// «86: Eighty Six 2 season» → { base: '86: Eighty Six', season: 2 }.
+// TMDB тримає сезони всередині одного серіалу, тож слова про сезон у запиті заважають пошуку.
+const SEASON_PATTERNS = [
+  /(?:^|\s)(?:season|сезон|частина|part|cour)\s*(\d{1,2})(?=\s|$)/i,
+  /(?:^|\s)(\d{1,2})\s*-?(?:st|nd|rd|th|й|ий|ій)?\s*(?:season|сезон|частина|part|cour)(?=\s|$)/i,
+  /(?:^|\s)s(\d{1,2})(?=\s|$)/i,
+];
+function parseSeasonQuery(q) {
+  for (const re of SEASON_PATTERNS) {
+    const m = q.match(re);
+    if (!m) continue;
+    const base = q.replace(re, ' ').replace(/\s+/g, ' ').replace(/[\s:–—-]+$/, '').trim();
+    if (base) return { base, season: Number(m[1]) || null };
+  }
+  return { base: q, season: null };
+}
+
+async function addAnime(r, status, isPrivate = false, season = null, query = '') {
+  if (r.mediaType === 'movie') return addMovie(r, status, isPrivate, query);
   const id = String(r.id);
   let tv = null;
   try { tv = await getTv(r.id); state.tv.set(r.id, tv); } catch (e) { console.warn(e); }
   const year = Number(r.date.slice(0, 4)) || null;
   let anilistId = null;
-  try { anilistId = await matchAnilist([r.originalName, tv?.name, r.name], year); } catch (e) { console.warn(e); }
+  try { anilistId = await matchAnilist([r.originalName, query, tv?.name, r.name], year); } catch (e) { console.warn(e); }
+
+  // у запиті був сезон («… 2 season»): переходимо на відповідний запис у лінії сезонів AniList
+  let progressSeason = 1;
+  if (season > 1) {
+    if (anilistId) {
+      try {
+        setFranchise(await getFranchise(anilistId));
+        const chain = franchiseOf({ anilistId, type: 'tv' })?.chain || [];
+        const start = chain.findIndex((n) => n.id === anilistId);
+        const node = chain[start + season - 1];
+        if (start >= 0 && node) { anilistId = node.id; progressSeason = start + season; }
+      } catch (e) { console.warn(e); }
+    } else {
+      progressSeason = Math.min(season, Math.max(1, ...(tv?.seasons || []).map((s) => s.season)));
+    }
+  }
 
   const now = Date.now();
   const data = {
@@ -1510,7 +1568,7 @@ async function addAnime(r, status, isPrivate = false) {
     poster: posterUrl(tv?.poster || r.poster_path),
     overview: tv?.overview || r.overview || '',
     status,
-    progress: { season: 1, episode: 0 },
+    progress: { season: progressSeason, episode: 0 },
     watchUrl: '',
     watchedExtras: [],
     private: !!isPrivate,
@@ -1523,13 +1581,13 @@ async function addAnime(r, status, isPrivate = false) {
   return id;
 }
 
-async function addMovie(r, status, isPrivate) {
+async function addMovie(r, status, isPrivate, query = '') {
   const id = `movie-${r.id}`;
   let mv = null;
   try { mv = await getMovie(r.id); } catch (e) { console.warn(e); }
   const year = Number(r.date.slice(0, 4)) || mv?.year || null;
   let anilistId = null; // для порад
-  try { anilistId = await matchAnilist([r.originalName, mv?.name, r.name], year, ['MOVIE']); } catch (e) { console.warn(e); }
+  try { anilistId = await matchAnilist([r.originalName, query, mv?.name, r.name], year, ['MOVIE']); } catch (e) { console.warn(e); }
 
   const now = Date.now();
   const data = {

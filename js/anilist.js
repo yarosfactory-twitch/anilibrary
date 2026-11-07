@@ -30,7 +30,7 @@ const FULL = `id siteUrl episodes status format seasonYear
   nextAiringEpisode { episode airingAt }
   relations { edges { relationType node { id type format status episodes title { romaji english } startDate { year month day } } } }`;
 
-const SHORT = 'id episodes format seasonYear title { romaji english } coverImage { medium }';
+const SHORT = 'id episodes format seasonYear title { romaji english native } coverImage { medium }';
 
 function slim(m) {
   const seq = (m.relations?.edges || [])
@@ -155,13 +155,30 @@ const LEAF = ['SPIN_OFF', 'SUMMARY']; // показуємо, але їхні з�
 const FR_QUERY = `query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids, type: ANIME) {
   id siteUrl format status episodes seasonYear isAdult
   title { romaji english } coverImage { medium } startDate { year month day }
-  relations { edges { relationType node { id type format isAdult } } }
+  relations { edges { relationType node { id type format isAdult title { romaji english } startDate { year month day } } } }
 } } }`;
+
+const FR_VERSION = 2; // змінюється, коли міняється логіка франшизи, — старий кеш ігноруємо
 
 // дані франшизи зберігаються один раз (fr:<корінь>), а для кожного учасника — вказівник (frp:<id>)
 function readFranchise(id) {
   const root = readCache(`frp:${id}`);
-  return root ? readCache(`fr:${root}`) : null;
+  const c = root ? readCache(`fr:${root}`) : null;
+  return c?.v === FR_VERSION ? c : null;
+}
+
+const normTitle = (s) => (s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+const dateKey = (d) => (d?.year || 9999) * 10000 + (d?.month || 12) * 100 + (d?.day || 28);
+
+// AniList інколи пов'язує сезони як OTHER, а не SEQUEL (напр. «Cyberpunk: Edgerunners» → «… 2»).
+// Якщо це серіал і назва одного продовжує назву іншого — вважаємо це сусіднім сезоном.
+function otherAsSeason(m, node) {
+  if (!SERIES.includes(node.format) || !SERIES.includes(m.format)) return null;
+  const a = [m.title.english, m.title.romaji].map(normTitle).filter((t) => t.length >= 4);
+  const b = [node.title?.english, node.title?.romaji].map(normTitle).filter((t) => t.length >= 4);
+  const related = a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)));
+  if (!related) return null;
+  return dateKey(node.startDate) > dateKey(m.startDate) ? 'SEQUEL' : 'PREQUEL';
 }
 
 export const peekFranchise = (id) => readFranchise(id)?.data ?? null;
@@ -185,9 +202,9 @@ async function loadFranchise(id) {
     for (const m of d.Page.media) {
       if (m.isAdult || m.format === 'MUSIC') continue;
       const rel = m.relations.edges
-        .filter((e) => [...EXPAND, ...LEAF].includes(e.relationType)
-          && e.node.type === 'ANIME' && e.node.format !== 'MUSIC' && !e.node.isAdult)
-        .map((e) => ({ type: e.relationType, id: e.node.id }));
+        .filter((e) => e.node.type === 'ANIME' && e.node.format !== 'MUSIC' && !e.node.isAdult)
+        .map((e) => ({ type: e.relationType === 'OTHER' ? otherAsSeason(m, e.node) : e.relationType, id: e.node.id }))
+        .filter((r) => [...EXPAND, ...LEAF].includes(r.type));
       const v = via.get(m.id) ?? null;
       nodes.set(m.id, {
         id: m.id,
@@ -214,7 +231,7 @@ async function loadFranchise(id) {
   const data = [...nodes.values()];
   if (!data.length) return data;
   const root = Math.min(...nodes.keys());
-  writeCache(`fr:${root}`, { t: Date.now(), data });
+  writeCache(`fr:${root}`, { v: FR_VERSION, t: Date.now(), data });
   for (const k of nodes.keys()) writeCache(`frp:${k}`, root);
   return data;
 }
@@ -225,6 +242,7 @@ export async function searchAnilist(q) {
     id: m.id,
     title: m.title.english || m.title.romaji,
     romaji: m.title.romaji,
+    native: m.title.native,
     format: m.format,
     year: m.seasonYear,
     episodes: m.episodes,
@@ -234,7 +252,9 @@ export async function searchAnilist(q) {
 
 // Автоматичний підбір запису за назвами з TMDB. Перевага — серіал того ж року (зазвичай 1 сезон).
 export async function matchAnilist(names, year, formats = SERIES) {
-  for (const name of [...new Set(names.filter(Boolean))]) {
+  // NFKC: «８６―エイティシックス―» → «86―エイティシックス―» (AniList не шукає широкі символи)
+  const variants = names.filter(Boolean).flatMap((n) => [n.normalize('NFKC'), n.normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()]);
+  for (const name of [...new Set(variants)].filter((n) => !/[а-яіїєґ]/i.test(n)).slice(0, 5)) { // кирилицею AniList не шукає
     const list = await searchAnilist(name).catch(() => []);
     const series = list.filter((m) => formats.includes(m.format));
     const pick = series.find((m) => year && m.year === year) || series[0];
