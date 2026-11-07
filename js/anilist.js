@@ -7,18 +7,57 @@ const SERIES = ['TV', 'TV_SHORT', 'ONA']; // формати, які вважає
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function gql(query, variables, retries = 2) {
-  const res = await fetch(API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ query, variables }),
+// Запити до AniList ідуть по одному з паузою (ліміт AniList ~30 запитів на хвилину).
+// Дві черги: запити видимої сторінки йдуть першими, фонові (франшизи) — коли немає інших.
+// Після відмови через ліміт уся черга чекає (pauseUntil), а не лише той запит.
+const jobs = { high: [], low: [] };
+let pumping = false;
+let lastRequestAt = 0;
+let pauseUntil = 0;
+
+function enqueue(fn, low) {
+  return new Promise((resolve, reject) => {
+    jobs[low ? 'low' : 'high'].push({ fn, resolve, reject });
+    pump();
   });
-  // ліміт запитів AniList: чекаємо, скільки просять (не довше 30 с), і пробуємо ще раз
-  if (res.status === 429 && retries > 0) {
-    const wait = Math.min(Number(res.headers.get('Retry-After')) || 10, 30);
-    await sleep(wait * 1000);
-    return gql(query, variables, retries - 1);
+}
+
+async function pump() {
+  if (pumping) return;
+  pumping = true;
+  while (jobs.high.length || jobs.low.length) {
+    const wait = Math.max(lastRequestAt + 400, pauseUntil) - Date.now();
+    if (wait > 0) await sleep(wait);
+    const job = jobs.high.shift() || jobs.low.shift(); // пріоритетний міг з'явитися під час паузи
+    lastRequestAt = Date.now();
+    try { job.resolve(await job.fn()); } catch (e) { job.reject(e); }
   }
+  pumping = false;
+}
+
+async function gql(query, variables, { low = false } = {}, attempt = 0) {
+  let res;
+  try {
+    res = await enqueue(() => fetch(API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ query, variables }),
+    }), low);
+  } catch {
+    // Safari при відмові (зокрема через ліміт) часто дає лише «Load failed» — чекаємо й пробуємо ще
+    if (attempt < 2) {
+      pauseUntil = Math.max(pauseUntil, Date.now() + (attempt ? 10000 : 4000));
+      return gql(query, variables, { low }, attempt + 1);
+    }
+    throw new Error('Не вдалося зв\'язатися з AniList. Перевірте інтернет або спробуйте за хвилину.');
+  }
+  // ліміт запитів AniList: чекаємо, скільки просять (не довше 30 с), і пробуємо ще раз
+  if (res.status === 429 && attempt < 2) {
+    const wait = Math.min(Number(res.headers.get('Retry-After')) || 10, 30);
+    pauseUntil = Math.max(pauseUntil, Date.now() + wait * 1000);
+    return gql(query, variables, { low }, attempt + 1);
+  }
+  if (res.status === 429) throw new Error('AniList тимчасово обмежив кількість запитів. Спробуйте за хвилину.');
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json.errors) throw new Error(`AniList: ${json.errors?.[0]?.message || `помилка ${res.status}`}`);
   return json.data;
@@ -119,12 +158,13 @@ export async function getRecommendations(ids, { force = false } = {}) {
     if (!force && c?.v === 3 && Date.now() - c.t < CACHE_HOURS * 4 * 3600e3) out.set(id, c.data);
     else todo.push(id);
   }
-  for (let i = 0; i < todo.length; i += 20) {
-    const d = await gql(`query ($ids: [Int]) { Page(perPage: 20) { media(id_in: $ids, type: ANIME) { id
+  // по 10: з вкладеними рекомендаціями більша пачка може перевищити «складність» запиту AniList
+  for (let i = 0; i < todo.length; i += 10) {
+    const d = await gql(`query ($ids: [Int]) { Page(perPage: 10) { media(id_in: $ids, type: ANIME) { id
       recommendations(sort: RATING_DESC, perPage: 10) { nodes { rating mediaRecommendation {
         id siteUrl format seasonYear episodes status averageScore isAdult genres description(asHtml: false)
         title { romaji english native } coverImage { large }
-      } } } } } }`, { ids: todo.slice(i, i + 20) });
+      } } } } } }`, { ids: todo.slice(i, i + 10) });
     for (const m of d.Page.media) {
       const recs = m.recommendations.nodes
         .filter((n) => n.mediaRecommendation && !n.mediaRecommendation.isAdult && n.rating > 0)
@@ -188,23 +228,62 @@ function otherAsSeason(m, node) {
 
 export const peekFranchise = (id) => readFranchise(id)?.data ?? null;
 
+const frFresh = (id) => {
+  const c = readFranchise(id);
+  return c && Date.now() - c.t < CACHE_HOURS * 12 * 3600e3 ? c.data : null;
+};
+
 const frPending = new Map(); // id → проміс, щоб не вантажити ту саму франшизу двічі паралельно
 
-export function getFranchise(id, { force = false } = {}) {
-  const c = readFranchise(id);
-  if (!force && c && Date.now() - c.t < CACHE_HOURS * 12 * 3600e3) return Promise.resolve(c.data);
-  if (!frPending.has(id)) frPending.set(id, loadFranchise(id).finally(() => frPending.delete(id)));
+// Франшиза одного тайтлу (картка тайтлу, додавання) — пріоритетний запит.
+export function getFranchise(id) {
+  const fresh = frFresh(id);
+  if (fresh) return Promise.resolve(fresh);
+  if (!frPending.has(id)) {
+    frPending.set(id, getFranchises([id]).then(() => frFresh(id) || []).finally(() => frPending.delete(id)));
+  }
   return frPending.get(id);
 }
 
-async function loadFranchise(id) {
+// Франшизи багатьох тайтлів одним спільним обходом: кожен рівень зв'язків — пачками по 50
+// записів. Для великого списку це десятки запитів замість сотень (окремий обхід на кожен тайтл).
+// Потім граф ділимо на зв'язні частини — кожна частина й є франшизою.
+export async function getFranchises(ids, { low = false } = {}) {
+  const need = [...new Set(ids)].filter((id) => !frFresh(id));
+  if (!need.length) return;
   const nodes = new Map();
-  const via = new Map([[id, null]]); // яким зв'язком знайшли запис
-  let frontier = [id];
-  for (let depth = 0; frontier.length && depth < 10 && nodes.size < 80; depth++) {
-    const d = await gql(FR_QUERY, { ids: frontier.slice(0, 50) });
+  const via = new Map(need.map((id) => [id, null])); // яким зв'язком знайшли запис
+  let frontier = need;
+  for (let depth = 0; frontier.length && depth < 12 && nodes.size < 3000; depth++) {
     const next = [];
-    for (const m of d.Page.media) {
+    for (let i = 0; i < frontier.length; i += 50) {
+      const d = await gql(FR_QUERY, { ids: frontier.slice(i, i + 50) }, { low });
+      collect(d.Page.media, next);
+    }
+    frontier = next;
+  }
+
+  // зв'язні частини графа (об'єднання множин)
+  const parent = new Map([...nodes.keys()].map((k) => [k, k]));
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  for (const n of nodes.values()) {
+    for (const r of n.rel) if (nodes.has(r.id)) parent.set(find(n.id), find(r.id));
+  }
+  const groups = new Map();
+  for (const n of nodes.values()) {
+    const k = find(n.id);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(n);
+  }
+  const t = Date.now();
+  for (const data of groups.values()) {
+    const root = Math.min(...data.map((n) => n.id));
+    writeCache(`fr:${root}`, { v: FR_VERSION, t, data });
+    for (const n of data) writeCache(`frp:${n.id}`, root);
+  }
+
+  function collect(media, next) {
+    for (const m of media) {
       if (m.isAdult || m.format === 'MUSIC') continue;
       const rel = m.relations.edges
         .filter((e) => e.node.type === 'ANIME' && e.node.format !== 'MUSIC' && !e.node.isAdult)
@@ -231,14 +310,7 @@ async function loadFranchise(id) {
         next.push(r.id);
       }
     }
-    frontier = next;
   }
-  const data = [...nodes.values()];
-  if (!data.length) return data;
-  const root = Math.min(...nodes.keys());
-  writeCache(`fr:${root}`, { v: FR_VERSION, t: Date.now(), data });
-  for (const k of nodes.keys()) writeCache(`frp:${k}`, root);
-  return data;
 }
 
 const shortOf = (m) => ({

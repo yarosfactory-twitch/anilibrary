@@ -4,7 +4,7 @@ import {
 } from './tmdb.js';
 import {
   getAnilist, peekAnilist, searchAnilist, matchAnilist, clearAnilistCache, getAiring, getRecommendations,
-  getFranchise, peekFranchise, getAnilistShort,
+  getFranchise, getFranchises, peekFranchise, getAnilistShort,
 } from './anilist.js';
 
 const STATUSES = {
@@ -248,7 +248,8 @@ function pendingExtras(a) {
     && sortKey(n.start) >= from && sortKey(n.start) < to);
 }
 
-// фоново підтягуємо франшизи для списку (по одній, щоб не впертися в ліміт AniList)
+// фоново підтягуємо франшизи для списку: один спільний обхід, у фоновій черзі AniList
+// (запити видимої сторінки йдуть першими)
 let frRunning = false;
 // all: усі тайтли з AniList (потрібно порадам, щоб відкидати франшизи зі списку), інакше лише активні
 let frAgainAll = false;
@@ -257,9 +258,14 @@ async function ensureFranchises(all = false) {
   frRunning = true;
   const list = items().filter((a) => a.anilistId
     && (all || (!isMovie(a) && ['watching', 'waiting', 'completed'].includes(a.status))));
+  try {
+    await getFranchises(list.map((a) => a.anilistId), { low: true });
+  } catch (e) {
+    console.warn('franchise:', e);
+  }
   for (const a of list) {
-    if (state.fr.has(a.anilistId) && all) continue; // франшиза вже відома (інший тайтл з неї)
-    try { setFranchise(await getFranchise(a.anilistId)); } catch (e) { console.warn('franchise:', e); break; }
+    const data = peekFranchise(a.anilistId);
+    if (data) setFranchise(data);
   }
   frRunning = false;
   if (frAgainAll) { frAgainAll = false; return ensureFranchises(true); }
@@ -887,7 +893,8 @@ function calendarView() {
         </div>
         ${inThisMonth ? '' : '<button class="btn sm mt" data-cal="today">До сьогодні</button>'}
         ${airing === null ? '<p class="muted small mt">Завантажую розклад…</p>' : ''}
-        ${airError ? `<p class="notice mt">${esc(airError)}</p>` : ''}
+        ${airError ? `<p class="notice mt">${esc(airError)}</p>
+          <button class="btn sm" data-cal="retry">Спробувати ще</button>` : ''}
       </div>
       <div>
         <h2 class="section-title cal-day-title">${esc(selTitle)}</h2>
@@ -909,6 +916,8 @@ function calendarView() {
         const d = keyDate(day);
         if (d.getMonth() !== state.calMonth.getMonth()) { state.calMonth = new Date(d.getFullYear(), d.getMonth(), 1); load(); }
         render();
+      } else if (step === 'retry') {
+        load();
       } else if (step) {
         const t = new Date();
         if (step === 'today') {
